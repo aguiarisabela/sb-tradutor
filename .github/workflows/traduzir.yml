@@ -1,0 +1,43 @@
+name: Traduzir fila
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # a cada 6 horas (cada execução dura até ~5h40)
+  workflow_dispatch:        # botão "Run workflow" para começar na hora
+
+concurrency:
+  group: traducao
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  traduzir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Traduzir
+        run: node traduzir.js
+        env:
+          PONTE_URL: ${{ secrets.PONTE_URL }}
+          PONTE_TOKEN: ${{ secrets.PONTE_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+      # Registra a execução no repositório. Sem atividade por 60 dias,
+      # o GitHub desliga o agendamento de repositórios públicos.
+      - name: Registrar execução
+        if: always()
+        run: |
+          date -u > ultima-execucao.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898341+github-actions[bot]@users.noreply.github.com"
+          git add ultima-execucao.txt
+          git commit -m "Registro de execução" || true
+          git push || true
