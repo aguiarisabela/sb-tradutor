@@ -8,7 +8,10 @@
  * Variáveis (Secrets do GitHub): PONTE_URL, PONTE_TOKEN, OPENROUTER_API_KEY.
  */
 
-const { PONTE_URL, PONTE_TOKEN, OPENROUTER_API_KEY } = process.env;
+const limpar = v => String(v || "").trim().replace(/^["']|["']$/g, "").replace(/^Bearer\s+/i, "");
+const PONTE_URL = limpar(process.env.PONTE_URL);
+const PONTE_TOKEN = limpar(process.env.PONTE_TOKEN);
+const OPENROUTER_API_KEY = limpar(process.env.OPENROUTER_API_KEY);
 const IA_URL = process.env.IA_URL || "https://openrouter.ai/api/v1/chat/completions";
 const LIMITE_MS = Number(process.env.LIMITE_MINUTOS || 340) * 60 * 1000;
 const INICIO = Date.now();
@@ -109,6 +112,7 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
     }
 
     if (r.status === 402) throw erro("COTA", "Créditos do OpenRouter esgotados.");
+    if (r.status === 401) throw erro("COTA", "Chave do OpenRouter recusada. Confira o Secret OPENROUTER_API_KEY.");
 
     if (r.status === 429 || r.status >= 500) {
       log("IA ocupada (HTTP " + r.status + "). Tentativa " + tentativa + ".");
