@@ -1,0 +1,11 @@
+{
+  "name": "sb-tradutor",
+  "private": true,
+  "description": "Tradução automática EN→PT-BR no padrão SB, rodando no GitHub Actions.",
+  "scripts": {
+    "start": "node traduzir.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
