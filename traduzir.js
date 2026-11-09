@@ -129,6 +129,23 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
 
 /* ---------- Leitura da resposta (igual ao Trechos.gs) ---------- */
 
+/**
+ * Pontuação de diálogo no padrão SB:
+ * - travessão de fala é sempre "—" (troca "–", "―", "−" e "-" usados no lugar dele);
+ * - travessão colado em palavra vira reticências ("eu—e—não sei" → "eu… e… não sei").
+ */
+function corrigirPontuacao(texto) {
+  let t = texto.replace(/^(\*{0,3})[–―−-]\s*/, "$1— ");
+
+  // Dentro da fala (bloco que começa com travessão), o intercalado também vira "—".
+  if (/^\*{0,3}— /.test(t)) t = t.replace(/\s[–―−-]\s/g, " — ");
+
+  return t
+    .replace(/(\p{L})[—–](?=\p{L})/gu, "$1… ")
+    .replace(/(\p{L})[—–](?=$|[”"*?!.,])/gu, "$1…");
+}
+
+
 function lerResposta(texto) {
   const blocos = [];
 
@@ -138,9 +155,9 @@ function lerResposta(texto) {
 
     const m = l.match(/^\[(\d+)\]\s*(.*)$/);
     if (m) {
-      if (m[2].trim()) blocos.push({ num: Number(m[1]), texto: m[2].trim() });
+      if (m[2].trim()) blocos.push({ num: Number(m[1]), texto: corrigirPontuacao(m[2].trim()) });
     } else if (blocos.length) {
-      blocos.push({ num: blocos[blocos.length - 1].num, texto: l });
+      blocos.push({ num: blocos[blocos.length - 1].num, texto: corrigirPontuacao(l) });
     }
   });
 
