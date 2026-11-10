@@ -106,7 +106,14 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
       if (json.usage && json.usage.cost) gastoUS += json.usage.cost;
 
       if (c.finish_reason === "length") throw erro("LONGO", "Resposta cortada por tamanho. Diminua PALAVRAS_POR_TRECHO.");
-      if (!texto.trim()) throw erro("BLOQUEIO", "Resposta vazia da IA (motivo: " + c.finish_reason + ").");
+      if (c.finish_reason === "content_filter") throw erro("BLOQUEIO", "A IA recusou o trecho (filtro de conteúdo).");
+
+      // Falha passageira do provedor: resposta vazia ou interrompida. Tenta de novo.
+      if (!texto.trim() || c.finish_reason === "error") {
+        log("IA devolveu resposta vazia (motivo: " + c.finish_reason + "). Tentativa " + tentativa + ".");
+        await esperar(30000 * tentativa);
+        continue;
+      }
 
       return texto;
     }
@@ -246,28 +253,42 @@ async function traduzirTrecho(item) {
 
 /* ---------- Motor ---------- */
 
+const ESPERA_ERRO_MS = 10 * 60 * 1000;
+const restante = () => LIMITE_MS - (Date.now() - INICIO);
+
+/** Espera 10 minutos (ou o que faltar da execução) antes de tentar de novo. */
+async function esperarETentar(motivo) {
+  const ms = Math.min(ESPERA_ERRO_MS, Math.max(restante(), 0));
+  log(motivo + " Tentando de novo em " + Math.round(ms / 60000) + " min.");
+  await esperar(ms);
+}
+
+/** Avisa o GitHub para começar a próxima execução logo depois desta. */
+function pedirContinuacao() {
+  if (process.env.GITHUB_OUTPUT) require("fs").appendFileSync(process.env.GITHUB_OUTPUT, "continuar=true\n");
+}
+
+
 async function main() {
   if (!PONTE_URL || !PONTE_TOKEN || !OPENROUTER_API_KEY) {
     throw new Error("Faltam os Secrets PONTE_URL, PONTE_TOKEN ou OPENROUTER_API_KEY.");
   }
 
-  let errosSeguidos = 0;
   let trechos = 0;
+  let motivoFim = "";
 
-  while (Date.now() - INICIO < LIMITE_MS) {
+  while (restante() > 0) {
     let item;
 
     try {
       item = await ponte("proximo");
     } catch (e) {
-      log("ERRO ao buscar o próximo trecho: " + e.message);
-      if (++errosSeguidos >= 3) break;
-      await esperar(120000);
+      await esperarETentar("ERRO ao buscar o próximo trecho: " + e.message + ".");
       continue;
     }
 
     if (item.vazio) {
-      log("Fila vazia: nenhum livro NA FILA ou EM ANDAMENTO.");
+      motivoFim = "Fila vazia: nenhum livro NA FILA ou EM ANDAMENTO. Confiro de novo na próxima hora.";
       break;
     }
 
@@ -292,29 +313,32 @@ async function main() {
         " · total desta execução: US$ " + gastoUS.toFixed(4));
 
       trechos++;
-      errosSeguidos = 0;
 
     } catch (e) {
+      // Créditos ou chave: não adianta insistir.
       if (e.tipo === "COTA") {
-        log("PARADO: " + e.message + " Recarregue os créditos; a próxima execução continua de onde parou.");
+        motivoFim = "PARADO: " + e.message + " Recarregue; a próxima execução continua de onde parou.";
         break;
       }
 
+      // Problema no conteúdo do trecho: repetir daria o mesmo resultado.
       if (e.tipo === "LONGO" || e.tipo === "BLOQUEIO") {
         log("LIVRO PAUSADO: " + e.message);
         await ponte("pausar", { originalId: item.originalId, mensagem: e.message }).catch(() => {});
         continue;
       }
 
-      log("ERRO: " + e.message);
-      if (++errosSeguidos >= 3) {
-        await ponte("pausar", { originalId: item.originalId, mensagem: "erro: " + e.message.slice(0, 120) }).catch(() => {});
-        errosSeguidos = 0;
-      }
-      await esperar(60000);
+      // Qualquer outra falha (IA fora do ar, Google, rede): espera e repete o mesmo trecho.
+      await esperarETentar("ERRO: " + e.message + ". Nada foi gravado.");
     }
   }
 
+  if (!motivoFim) {
+    motivoFim = "Tempo da execução esgotado. A próxima começa em seguida.";
+    pedirContinuacao();
+  }
+
+  log(motivoFim);
   log("Fim desta execução: " + trechos + " trecho(s), US$ " + gastoUS.toFixed(4) + ".");
 }
 
