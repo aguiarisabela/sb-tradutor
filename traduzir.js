@@ -46,7 +46,10 @@ async function ponte(acao, dados = {}) {
       try {
         json = JSON.parse(texto);
       } catch {
-        throw new Error("Resposta inesperada da ponte (HTTP " + r.status + "): " + texto.slice(0, 300));
+        // Página de erro do Google: mostra só o texto legível (a mensagem do erro).
+        const legivel = texto.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ").replace(/&[a-z#0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
+        throw new Error("Resposta inesperada da ponte (HTTP " + r.status + "): " + legivel.slice(0, 400));
       }
 
       if (json.erro && json.tipo !== "OCUPADO") throw erro(json.tipo || "PONTE", json.erro);
