@@ -8,6 +8,8 @@
  * Variáveis (Secrets do GitHub): PONTE_URL, PONTE_TOKEN, OPENROUTER_API_KEY.
  */
 
+const regras = require("./regras.js");
+
 const limpar = v => String(v || "").trim().replace(/^["']|["']$/g, "").replace(/^Bearer\s+/i, "");
 const PONTE_URL = limpar(process.env.PONTE_URL);
 const PONTE_TOKEN = limpar(process.env.PONTE_TOKEN);
@@ -81,7 +83,7 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
             { role: "system", content: instrucoes },
             { role: "user", content: mensagem }
           ],
-          max_tokens: 32000,
+          max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
           session_id: sessao, // mantém o mesmo provedor e aproveita o cache
           usage: { include: true }
@@ -105,7 +107,8 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
 
       if (json.usage && json.usage.cost) gastoUS += json.usage.cost;
 
-      if (c.finish_reason === "length") throw erro("LONGO", "Resposta cortada por tamanho. Diminua PALAVRAS_POR_TRECHO.");
+      // Cortada por tamanho: devolve o que veio; quem chamou pede a continuação.
+      if (c.finish_reason === "length") return { texto, cortado: true };
       if (c.finish_reason === "content_filter") throw erro("BLOQUEIO", "A IA recusou o trecho (filtro de conteúdo).");
 
       // Falha passageira do provedor: resposta vazia ou interrompida. Tenta de novo.
@@ -115,7 +118,7 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
         continue;
       }
 
-      return texto;
+      return { texto, cortado: false };
     }
 
     if (r.status === 402) throw erro("COTA", "Créditos do OpenRouter esgotados.");
@@ -199,10 +202,51 @@ async function traduzirTrecho(item) {
   const n = item.en.length;
   const versao = blocos => blocos.map(b => "[" + b.num + "] " + b.texto).join("\n");
 
-  const pedir = async mensagem => {
-    const resposta = await chamarIA(item.config, item.instrucoes, mensagem, sessao);
-    glossario.push(...lerGlossario(resposta));
-    return lerResposta(resposta);
+  // Pede à IA e, se a resposta vier cortada por tamanho, continua de onde parou:
+  // guarda só os parágrafos completos e pede o resto, sem cortar parágrafo no meio.
+  const pedir = async (mensagem, de = 1, ate = n) => {
+    const blocos = [];
+    let inicio = de;
+    let fim = ate;
+
+    for (let parte = 1; parte <= 8; parte++) {
+      const msg = inicio === de && fim === ate ? mensagem : mensagem +
+        "\n\n=== CONTINUAÇÃO ===\nOs parágrafos de [" + de + "] a [" + (inicio - 1) + "] já foram recebidos. " +
+        "Devolva SOMENTE de [" + inicio + "] a [" + fim + "], no mesmo formato, sem repetir os anteriores.";
+
+      const r = await chamarIA(item.config, item.instrucoes, msg + regras.lembreteFinal(), sessao);
+      glossario.push(...lerGlossario(r.texto));
+
+      let novos = lerResposta(r.texto).filter(b => b.num >= inicio && b.num <= fim);
+
+      // O último parágrafo de uma resposta cortada pode estar pela metade: descarta.
+      if (r.cortado && novos.length) {
+        const ultimo = novos[novos.length - 1].num;
+        novos = novos.filter(b => b.num !== ultimo);
+      }
+
+      blocos.push(...novos);
+      const recebidoAte = novos.length ? novos[novos.length - 1].num : inicio - 1;
+
+      if (!r.cortado) {
+        if (fim === ate) return blocos;
+        inicio = Math.max(recebidoAte, fim) + 1; // terminou a metade pedida; segue para o resto
+        fim = ate;
+        continue;
+      }
+
+      if (recebidoAte >= inicio) {
+        log("Resposta longa: recebido até [" + recebidoAte + "] de [" + ate + "]. Continuando de onde parou.");
+        inicio = recebidoAte + 1;
+      } else {
+        // Nada completo veio: pede metade do que falta.
+        if (fim <= inicio) throw erro("LONGO", "Um único parágrafo passou do limite de resposta da IA.");
+        fim = inicio + Math.floor((fim - inicio) / 2);
+        log("Resposta longa sem parágrafo completo. Pedindo de [" + inicio + "] a [" + fim + "].");
+      }
+    }
+
+    throw erro("LONGO", "A resposta continuou cortada depois de 8 partes.");
   };
 
   const conferir = blocos => ponte("conferir", { en: item.en, blocos, nomes: item.nomes });
@@ -247,7 +291,44 @@ async function traduzirTrecho(item) {
     }
   }
 
-  return { blocos, rodadas, glossario };
+  // Trava das regras SB: confere por código e manda corrigir só os parágrafos que quebraram alguma regra.
+  blocos = regras.autocorrigir(blocos);
+  let violacoes = regras.checarRegras(blocos, item.en);
+
+  for (let rodada = 1; violacoes.length && rodada <= 2; rodada++) {
+    const nums = new Set(violacoes.map(v => v.num));
+    const pedido = "=== CORREÇÃO DE REGRAS SB ===\n" +
+      "Reescreva SOMENTE os parágrafos abaixo, corrigindo a regra indicada em cada um, sem perder nem acrescentar conteúdo. " +
+      "Devolva cada um no formato [número] texto.\n\n" +
+      violacoes.map(v =>
+        "ORIGINAL [" + v.num + "] " + regras.textoEN(item.en, v.num) + "\n" +
+        "SUA VERSÃO:\n" + versao(blocos.filter(b => b.num === v.num)) + "\n" +
+        "CORRIJA: " + v.instrucoes.join(" ")
+      ).join("\n\n");
+
+    const r = await chamarIA(item.config, item.instrucoes, pedido, sessao);
+    const corrigidos = regras.autocorrigir(lerResposta(r.texto).filter(b => nums.has(b.num)));
+    const recebidos = new Set(corrigidos.map(b => b.num));
+
+    // Troca só os parágrafos que voltaram; o resto fica como estava.
+    const novos = [];
+    blocos.forEach(b => {
+      if (!recebidos.has(b.num)) return novos.push(b);
+      if (novos.some(x => x.num === b.num)) return;
+      novos.push(...corrigidos.filter(x => x.num === b.num));
+    });
+
+    const nova = await conferir(novos);
+    const novasViolacoes = regras.checarRegras(novos, item.en);
+    if (nova.grave || nova.falta > c.falta || novasViolacoes.length > violacoes.length) break;
+
+    blocos = novos;
+    c = nova;
+    violacoes = novasViolacoes;
+  }
+
+  const pendentes = violacoes.map(v => "§" + v.num + " (" + v.regras.join(", ") + ")");
+  return { blocos, rodadas, glossario, pendentes };
 }
 
 
@@ -297,16 +378,26 @@ async function main() {
       continue;
     }
 
+    // Trava: a skill e o Doc de exemplos precisam chegar à IA. Se não chegarem, pausa o livro.
+    const problema = regras.conferirInstrucoes(item.instrucoes, item.pedido);
+    if (problema) {
+      log("LIVRO PAUSADO: " + problema);
+      await ponte("pausar", { originalId: item.originalId, mensagem: problema }).catch(() => {});
+      continue;
+    }
+
     const custoAntes = gastoUS;
     log("Traduzindo: " + item.rotulo);
 
     try {
       const r = await traduzirTrecho(item);
-      const g = await ponte("gravar", { originalId: item.originalId, pos: item.pos, ...r });
+      const { pendentes, ...dados } = r;
+      const g = await ponte("gravar", { originalId: item.originalId, pos: item.pos, ...dados });
 
       (g.linhas || []).forEach(l => log(l));
       if (g.pausado) log("LIVRO PAUSADO: " + g.pausado);
       if (g.ignorado) log(g.ignorado);
+      log("Regras SB: " + (pendentes.length ? pendentes.length + " pendente(s): " + pendentes.join("; ") : "todas cumpridas") + ".");
       if (r.glossario.length) log("Glossário: " + r.glossario.length + " sugestão(ões) enviada(s).");
 
       log("Custo do trecho: US$ " + (gastoUS - custoAntes).toFixed(4) +
