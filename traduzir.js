@@ -99,7 +99,15 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
       continue;
     }
 
-    const corpo = await r.text();
+    // A conexão pode cair no meio da resposta ("terminated"): tenta de novo aqui mesmo.
+    let corpo;
+    try {
+      corpo = await r.text();
+    } catch (e) {
+      log("Conexão com a IA caiu no meio da resposta (" + e.message + "). Tentativa " + tentativa + ".");
+      await esperar(20000 * tentativa);
+      continue;
+    }
 
     if (r.status === 200) {
       const json = JSON.parse(corpo);
