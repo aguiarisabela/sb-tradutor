@@ -21,6 +21,7 @@ const INICIO = Date.now();
 let gastoUS = 0;
 let tokensEntrada = 0;
 let tokensCache = 0;
+let tokensSaida = 0;
 
 const esperar = ms => new Promise(r => setTimeout(r, ms));
 const hora = () => new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
@@ -91,6 +92,7 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
           session_id: sessao, // mantém o mesmo provedor e aproveita o cache
+          provider: { sort: "price" }, // mesmo modelo, no provedor mais barato (é mais lento)
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
@@ -122,6 +124,7 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
       if (json.usage) {
         tokensEntrada += json.usage.prompt_tokens || 0;
         tokensCache += (json.usage.prompt_tokens_details && json.usage.prompt_tokens_details.cached_tokens) || 0;
+        tokensSaida += json.usage.completion_tokens || 0;
       }
 
       // Cortada por tamanho: devolve o que veio; quem chamou pede a continuação.
@@ -273,6 +276,46 @@ async function traduzirTrecho(item) {
 
   const conferir = blocos => ponte("conferir", { en: item.en, blocos, nomes: item.nomes });
 
+  // Troca só os parágrafos que voltaram; o resto fica como estava (a ordem dentro do mesmo § se mantém).
+  const trocar = (atuais, corrigidos) => {
+    const recebidos = new Set(corrigidos.map(b => b.num));
+    return atuais.filter(b => !recebidos.has(b.num)).concat(corrigidos).sort((a, b) => a.num - b.num);
+  };
+
+  // Números de parágrafo citados num relatório da checagem ("§12" ou "[12]").
+  const apontados = texto => {
+    const nums = new Set();
+    String(texto || "").replace(/(?:§|\[)\s*(\d+)/g, (_, k) => {
+      k = Number(k);
+      if (k >= 1 && k <= n) nums.add(k);
+    });
+    return [...nums].sort((a, b) => a - b);
+  };
+
+  // Correção: a IA recebe o mesmo contexto de antes (skill, pedido e versão atual inteira),
+  // mas reescreve só os parágrafos apontados. Se o relatório não citar parágrafos,
+  // ou citar mais da metade, pede o trecho completo, como antes.
+  const revisar = async (atuais, titulo, relatorio, orientacao) => {
+    const base = item.pedido +
+      "\n\n=== SUA VERSÃO ATUAL ===\n" + versao(atuais) +
+      "\n\n=== " + titulo + " APONTOU ===\n" + relatorio +
+      "\n\n" + orientacao;
+    const nums = apontados(relatorio);
+
+    if (!nums.length || nums.length > n / 2) {
+      return pedir(base + " Devolva o trecho COMPLETO, de [1] a [" + n + "].");
+    }
+
+    log(titulo + ": reescrevendo só §" + nums.join(", §") + ".");
+    const quer = new Set(nums);
+    const r = await chamarIA(item.config, item.instrucoes, base + regras.lembreteFinal() +
+      "\n\n=== NESTA RESPOSTA ===\nDevolva SOMENTE os parágrafos " + nums.map(k => "[" + k + "]").join(", ") +
+      ", completos, no formato [número] texto. Não repita os demais.", sessao);
+
+    glossario.push(...lerGlossario(r.texto));
+    return trocar(atuais, lerResposta(r.texto).filter(b => quer.has(b.num)));
+  };
+
   let blocos = await pedir(item.pedido);
   let c = await conferir(blocos);
   let rodadas = 0;
@@ -284,12 +327,9 @@ async function traduzirTrecho(item) {
   ) {
     rodadas++;
 
-    const novos = await pedir(item.pedido +
-      "\n\n=== SUA VERSÃO ATUAL ===\n" + versao(blocos) +
-      "\n\n=== CHECAGEM MECÂNICA (3B) APONTOU ===\n" + c.textoConferencia +
-      "\n\nConfira cada ponto com o original. Traduza o que faltou e insira no lugar certo; " +
-      "corrija perda, acréscimo ou erro; mantenha o que, conferido, estiver correto. " +
-      "Devolva o trecho COMPLETO, de [1] a [" + n + "].");
+    const novos = await revisar(blocos, "CHECAGEM MECÂNICA (3B)", c.textoConferencia,
+      "Confira cada ponto com o original. Traduza o que faltou e insira no lugar certo; " +
+      "corrija perda, acréscimo ou erro; mantenha o que, conferido, estiver correto.");
 
     const nova = await conferir(novos);
     if (!melhorOuIgual(nova, c)) break;
@@ -330,11 +370,8 @@ async function traduzirTrecho(item) {
 
   // 3C: uma reescrita de estilo, aceita só se não piorar a 3B.
   if (!c.grave && c.alertasEstilo) {
-    const novos = await pedir(item.pedido +
-      "\n\n=== SUA VERSÃO ATUAL ===\n" + versao(blocos) +
-      "\n\n=== CHECAGEM DE ESTILO (3C) APONTOU ===\n" + c.textoEstilo +
-      "\n\nReescreva só o que for vício de estilo (seções 6A e 6B), sem perder nem acrescentar conteúdo. " +
-      "Devolva o trecho COMPLETO, de [1] a [" + n + "].");
+    const novos = await revisar(blocos, "CHECAGEM DE ESTILO (3C)", c.textoEstilo,
+      "Reescreva só o que for vício de estilo (seções 6A e 6B), sem perder nem acrescentar conteúdo.");
 
     const nova = await conferir(novos);
     if (!nova.grave && nova.alertas <= c.alertas) {
@@ -360,15 +397,7 @@ async function traduzirTrecho(item) {
 
     const r = await chamarIA(item.config, item.instrucoes, pedido, sessao);
     const corrigidos = regras.autocorrigir(lerResposta(r.texto).filter(b => nums.has(b.num)));
-    const recebidos = new Set(corrigidos.map(b => b.num));
-
-    // Troca só os parágrafos que voltaram; o resto fica como estava.
-    const novos = [];
-    blocos.forEach(b => {
-      if (!recebidos.has(b.num)) return novos.push(b);
-      if (novos.some(x => x.num === b.num)) return;
-      novos.push(...corrigidos.filter(x => x.num === b.num));
-    });
+    const novos = trocar(blocos, corrigidos);
 
     const nova = await conferir(novos);
     const novasViolacoes = regras.checarRegras(novos, item.en);
@@ -443,6 +472,7 @@ async function main() {
     const custoAntes = gastoUS;
     const entradaAntes = tokensEntrada;
     const cacheAntes = tokensCache;
+    const saidaAntes = tokensSaida;
     log("Traduzindo: " + item.rotulo);
 
     try {
@@ -461,6 +491,8 @@ async function main() {
         log("Leitura da skill e do pedido: " + entrada + " tokens, " +
           Math.round(100 * (tokensCache - cacheAntes) / entrada) + "% com desconto de cache.");
       }
+
+      log("Resposta da IA: " + (tokensSaida - saidaAntes) + " tokens.");
 
       log("Custo do trecho: US$ " + (gastoUS - custoAntes).toFixed(4) +
         " · total desta execução: US$ " + gastoUS.toFixed(4));
