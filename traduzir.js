@@ -176,12 +176,21 @@ function corrigirPontuacao(texto) {
 }
 
 
-/** "# Capítulo 1" → { nivel: 1, texto: "Capítulo 1" }. Sem "#", nivel 0 (texto comum). */
+/**
+ * "# Capítulo 1" → { nivel: 1, texto: "Capítulo 1" }. Sem "#", nivel 0 (texto comum).
+ * Aceita as variações que a IA às vezes devolve: "**## Penny**", "##Penny", "\\#\\# Penny".
+ */
 function separarTitulo(texto) {
-  const m = texto.match(/^(#{1,4})\s+(.+)$/);
+  const t = texto.replace(/\\#/g, "#");
+  const m = t.match(/^[*_]*\s*(#{1,6})\s*(.+)$/);
   return m
-    ? { nivel: m[1].length, texto: corrigirPontuacao(m[2].trim()) }
+    ? { nivel: Math.min(m[1].length, 4), texto: corrigirPontuacao(m[2].replace(/^[*_]+|[*_]+$/g, "").trim()) }
     : { nivel: 0, texto: corrigirPontuacao(texto) };
+}
+
+/** "# Capítulo 2 ## Penny" na mesma linha → dois títulos. */
+function partesDaLinha(texto) {
+  return /^[*_]*\s*\\?#/.test(texto) ? texto.split(/\s+(?=\\?#{1,6}\s*\S)/) : [texto];
 }
 
 
@@ -194,9 +203,9 @@ function lerResposta(texto) {
 
     const m = l.match(/^\[(\d+)\]\s*(.*)$/);
     if (m) {
-      if (m[2].trim()) blocos.push({ num: Number(m[1]), ...separarTitulo(m[2].trim()) });
+      if (m[2].trim()) partesDaLinha(m[2].trim()).forEach(p => blocos.push({ num: Number(m[1]), ...separarTitulo(p) }));
     } else if (blocos.length) {
-      blocos.push({ num: blocos[blocos.length - 1].num, ...separarTitulo(l) });
+      partesDaLinha(l).forEach(p => blocos.push({ num: blocos[blocos.length - 1].num, ...separarTitulo(p) }));
     }
   });
 
@@ -233,6 +242,10 @@ function melhorOuIgual(nova, atual) {
 async function traduzirTrecho(item) {
   const sessao = "sb-" + item.originalId;
   const glossario = [];
+
+  // Expressões do original que costumam virar calco: a orientação vai junto, só quando aparecem.
+  const dicas = regras.dicasDoTrecho(item.en);
+  if (dicas) item.pedido += dicas;
   const n = item.en.length;
   const versao = blocos => blocos.map(b => "[" + b.num + "] " + b.texto).join("\n");
 
