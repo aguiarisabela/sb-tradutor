@@ -32,8 +32,94 @@ const palavra = (lista, flags = "iu") => new RegExp("(?<!\\p{L})(" + lista + ")(
 const temFala = en => /^\s*\*{0,3}["“]/.test(en) || /[,?!…]\*{0,3}["”]/.test(en);
 
 
+/* Calcos do inglês já encontrados na revisão: [padrão, forma natural].
+ * Para acrescentar: copie uma linha e troque o padrão e a sugestão. */
+const CALCOS = [
+  ["bat\\p{L}* cinco|(?:para|receber|ganhar) um cinco", "high five → \"bater na mão\", \"toca aqui\""],
+  ["descans\\p{L}* sobre os louros", "rest on one's laurels → \"dormir sobre os louros\""],
+  ["mais vezes do que não", "more often than not → \"na maioria das vezes\""],
+  ["(?:não|nem) (?:é|foi|era) como se", "it's not like → \"não é que\", \"nem foi um jogo importante\""],
+  ["faz (?:\\p{L}+ )?(?:horas|dias|semanas|meses|anos|tempo) desde que", "it's been weeks since → \"faz semanas que não…\""],
+  ["(?:eu )?(?:já )?mencionei (?:que )?\\p{L}+\\?", "did I mention…? → \"Já falei que ele é…?\""],
+  ["fisicalidade", "physicality → \"o contato físico\", \"o corpo a corpo\""],
+  ["terapia de conversa", "talk therapy → \"terapia\""],
+  ["afeto parental", "parental affection → \"carinho de pai e mãe\""],
+  ["do norte do estado", "upstate New York → \"do interior de Nova York\""],
+  ["fazer (?:um )?nome para (?:nós|mim|si)(?: mesm\\p{L}+)?", "make a name for ourselves → \"fazer nome\""],
+  ["mão que (?:me|lhe|nos|te) foi dada", "the hand I've been dealt → \"as cartas que a vida me deu\""],
+  ["riso pelo nariz", "snort out a laugh → \"solta uma risada abafada\", \"bufa uma risada\""],
+  ["volta da vitória", "victory lap of high fives → \"rodada de comemoração\""],
+  ["(?:falo|fala|digo|diz|disse) sem expressão", "deadpan → \"digo, impassível\", \"sem mudar a cara\""],
+  ["passos? (?:visíveis )?para longe", "take steps away → \"se afastam\", \"recuam\""],
+  ["traseiro lento", "hurry his slow ass up → \"mexer essa bunda\", \"andar logo\""],
+  ["(?:olhar|olhos) (?:de \\p{L}+ )?sobre mim", "eyes on me → \"Penny olhando para mim\""],
+  ["ofensa cortante", "cutting insult → \"alfinetada\", \"insulto afiado\""],
+  ["c[êe]ntimos?", "nickel/dime/cents → \"centavos\" (\"cêntimo\" é de Portugal); apelido próprio fica como no original"],
+  ["(?:umas|as|algumas|duas) milhares", "a few thousand times → \"milhares de vezes\" (milhar é masculino: \"uns milhares\")"]
+];
+const RE_CALCOS = CALCOS.map(([p, s]) => [palavra(p), s]);
+
+
+/* Expressões do ORIGINAL que costumam virar calco: [padrão no inglês, orientação].
+ * O código procura no inglês ANTES de traduzir e manda a orientação só quando a
+ * expressão aparece no trecho (não aumenta o pedido dos trechos que não têm). */
+const EXPRESSOES_EN = [
+  [/\bhigh[- ]?fives?\b/i, "high five → \"bater na mão\", \"toca aqui\" (nunca \"bater cinco\" nem \"um cinco\")"],
+  [/\blaurels\b/i, "rest on one's laurels → \"dormir sobre os louros\""],
+  [/\bmore often than not\b/i, "more often than not → \"na maioria das vezes\""],
+  [/\bit['’]?s not like\b/i, "it's not like → negação direta (\"Não ganhamos…\", \"Não é que…\"), nunca \"Não é como se\""],
+  [/\b(?:it['’]?s|it has|it had) been (?:\w+ )?(?:seconds|minutes|hours|days|weeks|months|years|ages|forever|a while|so long|too long|long) since\b/i, "it's been X since → \"Faz X que (não)…\", nunca \"desde que\""],
+  [/\bdid i mention\b/i, "did I mention X? → \"Já falei que…?\""],
+  [/\bphysicality\b/i, "physicality → \"o contato físico\", \"o corpo a corpo\" (\"fisicalidade\" não existe)"],
+  [/\btalk therapy\b/i, "talk therapy → \"terapia\""],
+  [/\bparental (?:affection|love)\b/i, "parental affection → \"carinho de pai e mãe\""],
+  [/\bupstate\b/i, "upstate New York → \"interior de Nova York\""],
+  [/\bmake (?:a|their|our|his|her|my) name for\b/i, "make a name for oneself → \"fazer nome\""],
+  [/\bhand (?:i|he|she|we|they|you)(?:['’]ve| have| has| was| were)? (?:been )?dealt\b/i, "the hand I've been dealt → \"as cartas que a vida me deu\""],
+  [/\bsnort(?:s|ed|ing)?\b[^.?!]{0,15}\blaugh/i, "snort a laugh → \"solta uma risada abafada\", \"bufa uma risada\""],
+  [/\bdeadpan/i, "deadpan → \"impassível\", \"sem mudar a cara\""],
+  [/\bsteps? away\b/i, "take steps away → \"se afastar\", \"recuar\""],
+  [/\bass up\b/i, "hurry your ass up → \"mexer essa bunda\", \"andar logo\""],
+  [/\beyes on (?:me|him|her)\b/i, "eyes on me → \"olhando para mim\", nunca \"olhar sobre mim\""],
+  [/\bcutting (?:insult|remark|comment)/i, "cutting insult → \"alfinetada\", \"insulto afiado\""],
+  [/\bvictory lap\b/i, "victory lap → \"rodada de comemoração\""],
+  [/\baccident[- ]prone\b/i, "accident-prone → \"desastrado\""],
+  [/\berrant thought\b/i, "errant thought → reestruture (\"Só de pensar nisso…\")"],
+  [/\b(?:nickel|dime|cents?)\b/i, "moedas → \"centavos\" (nunca \"cêntimo\"); apelido com moeda fica como no original"],
+  [/\bfantas(?:y|ies)\b/i, "fantasy → \"fantasia\" (não é fantasma)"],
+  [/\bstrain\b/i, "strain no corpo de atleta → \"distensão\" (lesão), não \"esforço\""],
+  [/\bshot on\b/i, "made a shot on [goleiro] → \"marcou um gol em\""],
+  [/\bhighlight reel\b/i, "highlight reel → \"os melhores momentos\""],
+  [/\bthousands?\b/i, "thousand(s) → \"milhares\" é masculino (\"uns milhares\", nunca \"umas milhares\")"],
+  [/\bsick to (?:my|his|her|your) stomach\b/i, "sick to my stomach → \"o estômago embrulha\""],
+  [/\bheart sank\b|\bbutterflies\b/i, "heart sank / butterflies → \"aperto no peito\" / \"frio na barriga\""],
+  [/\b\w+ fucking \w+/i, "fucking no meio da frase → palavrão como interjeição entre vírgulas, no início ou no fim (\"Eu não ligo, porra.\")"],
+  [/(?:^|[“"\s])hell[,!]/i, "Hell, … → \"Inferno\" ou \"Porra\" (nunca \"Caramba\": não suavizar)"],
+  [/\bfuck\.? my\.? life\b/i, "Fuck. My. Life. → \"Que. Merda. De. Vida.\" (mantém o palavrão e as pausas)"]
+];
+
+/** Orientações das expressões que aparecem neste trecho do original, com o número do parágrafo. */
+function dicasDoTrecho(en) {
+  const achadas = new Map();
+  (en || []).forEach((_, i) => {
+    const t = textoEN(en, i + 1);
+    EXPRESSOES_EN.forEach(([re, dica]) => {
+      if (re.test(t)) achadas.set(dica, (achadas.get(dica) || []).concat(i + 1));
+    });
+  });
+  if (!achadas.size) return "";
+  return "\n\n=== EXPRESSÕES DESTE TRECHO QUE COSTUMAM VIRAR CALCO ===\n" +
+    [...achadas].map(([dica, nums]) => "- [" + nums.join("], [") + "] " + dica).join("\n");
+}
+
+
 /* Regras checadas em cada parágrafo traduzido. */
 const REGRAS = [
+  { nome: "calco do inglês", soCorrecao: true, // não vai no lembrete de todo pedido (custo)
+    teste: pt => RE_CALCOS.some(([re]) => re.test(pt)),
+    instrucao: pt => "Sem calco de expressão inglesa: escreva como um autor brasileiro escreveria. " +
+      RE_CALCOS.filter(([re]) => re.test(pt)).map(([, s]) => s).join("; ") + "." },
+
   { nome: "registro coloquial", padrao: palavra("tô|tá|tava|tavam|tamo|né|vc|pra|pras|pro|pros|cê"),
     instrucao: "Nunca \"tô\", \"tá\", \"tava\", \"né\", \"pra\", \"pro\", \"vc\", nem em fala: use a forma completa (\"estou\", \"está\", \"para\"). \"tá bom\" → \"está bem\" ou \"certo\"." },
 
@@ -111,6 +197,13 @@ function nivelOriginal(en, num) {
  */
 function ajustarTitulos(blocos, en) {
   return blocos.map(b => {
+    // Rede de segurança: nenhum "#" de markdown chega ao Doc como texto.
+    if (/^[*_\s]*#{1,6}/.test(b.texto)) {
+      const nivelIA = b.texto.replace(/^[*_\s]*/, "").match(/^#+/)[0].length;
+      b = { ...b, nivel: b.nivel || Math.min(nivelIA, 4),
+        texto: b.texto.replace(/^[*_\s]*#{1,6}\s*/, "").replace(/^[*_]+|[*_]+$/g, "").trim() };
+    }
+
     const original = nivelOriginal(en, b.num);
     if (original) return { ...b, nivel: original };
 
@@ -128,7 +221,8 @@ function checarRegras(blocos, en) {
     const enTexto = textoEN(en, num);
     const quebradas = REGRAS.filter(r => r.teste ? r.teste(pt, enTexto) : r.padrao.test(pt));
     if (quebradas.length) {
-      violacoes.push({ num, regras: quebradas.map(r => r.nome), instrucoes: quebradas.map(r => r.instrucao) });
+      violacoes.push({ num, regras: quebradas.map(r => r.nome),
+        instrucoes: quebradas.map(r => typeof r.instrucao === "function" ? r.instrucao(pt) : r.instrucao) });
     }
   });
 
@@ -141,7 +235,7 @@ function lembreteFinal() {
   return "\n\n=== ANTES DE RESPONDER, CONFIRA (regras SB, sem exceção) ===\n" +
     "- Siga a skill inteira e o Doc de exemplos SB do começo ao fim do trecho, não só no início.\n" +
     "- Traduza TODOS os parágrafos, na ordem, sem resumir, cortar ou juntar.\n" +
-    REGRAS.map(r => "- " + r.instrucao).join("\n") + "\n" +
+    REGRAS.filter(r => !r.soCorrecao).map(r => "- " + r.instrucao).join("\n") + "\n" +
     "- Fala hesitante usa reticências, nunca travessão colado na palavra (\"Eu… e… não sei.\").\n" +
     "- Mesmo tempo verbal do original; palavrões e cenas explícitas com o mesmo peso, sem suavizar.\n" +
     "- TÍTULOS: comece a linha de todo título com # e um espaço, mesmo que o original não esteja formatado como título:\n" +
@@ -170,4 +264,4 @@ function conferirInstrucoes(instrucoes, pedido) {
 }
 
 
-module.exports = { autocorrigir, checarRegras, lembreteFinal, conferirInstrucoes, textoEN, ajustarTitulos };
+module.exports = { dicasDoTrecho, autocorrigir, checarRegras, lembreteFinal, conferirInstrucoes, textoEN, ajustarTitulos };
