@@ -19,6 +19,8 @@ const LIMITE_MS = Number(process.env.LIMITE_MINUTOS || 340) * 60 * 1000;
 const INICIO = Date.now();
 
 let gastoUS = 0;
+let tokensEntrada = 0;
+let tokensCache = 0;
 
 const esperar = ms => new Promise(r => setTimeout(r, ms));
 const hora = () => new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
@@ -117,6 +119,10 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
       const texto = (c.message && c.message.content) || "";
 
       if (json.usage && json.usage.cost) gastoUS += json.usage.cost;
+      if (json.usage) {
+        tokensEntrada += json.usage.prompt_tokens || 0;
+        tokensCache += (json.usage.prompt_tokens_details && json.usage.prompt_tokens_details.cached_tokens) || 0;
+      }
 
       // Cortada por tamanho: devolve o que veio; quem chamou pede a continuação.
       if (c.finish_reason === "length") return { texto, cortado: true };
@@ -404,6 +410,8 @@ async function main() {
     }
 
     const custoAntes = gastoUS;
+    const entradaAntes = tokensEntrada;
+    const cacheAntes = tokensCache;
     log("Traduzindo: " + item.rotulo);
 
     try {
@@ -416,6 +424,12 @@ async function main() {
       if (g.ignorado) log(g.ignorado);
       log("Regras SB: " + (pendentes.length ? pendentes.length + " pendente(s): " + pendentes.join("; ") : "todas cumpridas") + ".");
       if (r.glossario.length) log("Glossário: " + r.glossario.length + " sugestão(ões) enviada(s).");
+
+      const entrada = tokensEntrada - entradaAntes;
+      if (entrada) {
+        log("Leitura da skill e do pedido: " + entrada + " tokens, " +
+          Math.round(100 * (tokensCache - cacheAntes) / entrada) + "% com desconto de cache.");
+      }
 
       log("Custo do trecho: US$ " + (gastoUS - custoAntes).toFixed(4) +
         " · total desta execução: US$ " + gastoUS.toFixed(4));
