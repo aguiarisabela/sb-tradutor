@@ -298,6 +298,36 @@ async function traduzirTrecho(item) {
     c = nova;
   }
 
+  // Parágrafo faltando: pede só os que faltaram (barato), até 3 vezes, e encaixa no lugar.
+  const faltando = lista => {
+    const tem = new Set(lista.map(b => b.num));
+    const f = [];
+    for (let k = 1; k <= n; k++) if (!tem.has(k)) f.push(k);
+    return f;
+  };
+
+  for (let tentativa = 1; tentativa <= 3 && faltando(blocos).length; tentativa++) {
+    const faltam = faltando(blocos);
+    log("Faltaram " + faltam.length + " parágrafo(s): §" + faltam.join(", §") + ". Pedindo só esses (tentativa " + tentativa + ").");
+
+    const pedido = "=== PARÁGRAFOS QUE FICARAM DE FORA ===\n" +
+      "Traduza SOMENTE os parágrafos abaixo, completos, seguindo todas as regras. " +
+      "Devolva cada um no formato [número] texto, com o mesmo número do original.\n\n" +
+      faltam.map(k => "[" + k + "] " + regras.textoEN(item.en, k)).join("\n\n");
+
+    const r = await chamarIA(item.config, item.instrucoes, pedido + regras.lembreteFinal(), sessao);
+    const quer = new Set(faltam);
+    const novos = lerResposta(r.texto).filter(b => quer.has(b.num));
+    if (!novos.length) continue;
+
+    blocos = blocos.concat(novos).sort((a, b) => a.num - b.num); // a ordem dentro do mesmo § se mantém
+    c = await conferir(blocos);
+  }
+
+  if (faltando(blocos).length) {
+    throw erro("FALTA", "Ainda faltam os parágrafos §" + faltando(blocos).join(", §") + " depois de 3 tentativas.");
+  }
+
   // 3C: uma reescrita de estilo, aceita só se não piorar a 3B.
   if (!c.grave && c.alertasEstilo) {
     const novos = await pedir(item.pedido +
@@ -380,6 +410,7 @@ async function main() {
 
   let trechos = 0;
   let motivoFim = "";
+  const refeitos = {};
 
   while (restante() > 0) {
     let item;
@@ -417,7 +448,7 @@ async function main() {
     try {
       const r = await traduzirTrecho(item);
       const { pendentes, ...dados } = r;
-      const g = await ponte("gravar", { originalId: item.originalId, pos: item.pos, ...dados });
+      const g = await ponte("gravar", { originalId: item.originalId, pos: item.pos, paragrafos: item.en.length, ...dados });
 
       (g.linhas || []).forEach(l => log(l));
       if (g.pausado) log("LIVRO PAUSADO: " + g.pausado);
@@ -441,6 +472,21 @@ async function main() {
       if (e.tipo === "COTA") {
         motivoFim = "PARADO: " + e.message + " Recarregue; a próxima execução continua de onde parou.";
         break;
+      }
+
+      // Parágrafo faltando mesmo depois das tentativas: refaz o trecho inteiro mais uma vez antes de pausar.
+      if (e.tipo === "FALTA") {
+        const chave = item.originalId + ":" + JSON.stringify(item.pos);
+        refeitos[chave] = (refeitos[chave] || 0) + 1;
+
+        if (refeitos[chave] <= 1) {
+          log(e.message + " Refazendo o trecho inteiro. Nada foi gravado.");
+          continue;
+        }
+
+        log("LIVRO PAUSADO: " + e.message);
+        await ponte("pausar", { originalId: item.originalId, mensagem: e.message }).catch(() => {});
+        continue;
       }
 
       // Problema no conteúdo do trecho: repetir daria o mesmo resultado.
