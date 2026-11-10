@@ -42,7 +42,7 @@ const REGRAS = [
   { nome: "termo em inglês", padrao: palavra("Doc|UK|US|USA", "u"),
     instrucao: "\"Doc\" (médica) → \"doutora\"; \"UK\" → \"Reino Unido\"; \"US\"/\"USA\" → \"Estados Unidos\"." },
 
-  { nome: "travessão na narração", teste: pt => !/^\*{0,3}—/.test(pt) && /\s—\s/.test(pt),
+  { nome: "travessão na narração", teste: pt => pt.split("\n").some(l => !/^\*{0,3}—/.test(l.trim()) && /\s—\s/.test(l)), // linha a linha: narração e fala podem vir em blocos separados
     instrucao: "Travessão só em diálogo. Na narração, troque por vírgula, ponto e vírgula, dois-pontos, reticências ou parênteses." },
 
   { nome: "fala sem travessão", teste: (pt, en) => /["“”]/.test(en) && /["“”]/.test(pt) && !/—/.test(pt),
