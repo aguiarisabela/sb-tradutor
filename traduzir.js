@@ -176,6 +176,15 @@ function corrigirPontuacao(texto) {
 }
 
 
+/** "# Capítulo 1" → { nivel: 1, texto: "Capítulo 1" }. Sem "#", nivel 0 (texto comum). */
+function separarTitulo(texto) {
+  const m = texto.match(/^(#{1,4})\s+(.+)$/);
+  return m
+    ? { nivel: m[1].length, texto: corrigirPontuacao(m[2].trim()) }
+    : { nivel: 0, texto: corrigirPontuacao(texto) };
+}
+
+
 function lerResposta(texto) {
   const blocos = [];
 
@@ -185,9 +194,9 @@ function lerResposta(texto) {
 
     const m = l.match(/^\[(\d+)\]\s*(.*)$/);
     if (m) {
-      if (m[2].trim()) blocos.push({ num: Number(m[1]), texto: corrigirPontuacao(m[2].trim()) });
+      if (m[2].trim()) blocos.push({ num: Number(m[1]), ...separarTitulo(m[2].trim()) });
     } else if (blocos.length) {
-      blocos.push({ num: blocos[blocos.length - 1].num, texto: corrigirPontuacao(l) });
+      blocos.push({ num: blocos[blocos.length - 1].num, ...separarTitulo(l) });
     }
   });
 
@@ -407,6 +416,9 @@ async function traduzirTrecho(item) {
     c = nova;
     violacoes = novasViolacoes;
   }
+
+  // Títulos: o nível do original vale sempre; sem nível no original, vale o que a IA reconheceu.
+  blocos = regras.ajustarTitulos(blocos, item.en);
 
   const pendentes = violacoes.map(v => "§" + v.num + " (" + v.regras.join(", ") + ")");
   const regrasPendentes = violacoes.map(v => ({ num: v.num, regras: v.regras }));
