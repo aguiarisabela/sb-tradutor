@@ -179,8 +179,13 @@ function lerGlossario(texto) {
   const itens = [];
 
   String(texto || "").split(/\r?\n/).forEach(linha => {
-    const m = linha.trim().match(/^\[G\]\s*([^|]+)\|([^|]+)\|(.+)$/i);
-    if (m) itens.push({ secao: m[1].trim(), termo: m[2].trim(), decisao: m[3].trim() });
+    // [G] SEÇÃO | inglês | decisão | nº do parágrafo | observação
+    const m = linha.trim().match(/^\[G\]\s*(.+)$/i);
+    if (!m) return;
+    const c = m[1].split("|").map(x => x.trim());
+    if (c.length < 3 || !c[1]) return;
+    const num = (c[3] || "").match(/\d+/);
+    itens.push({ secao: c[0], termo: c[1], decisao: c[2], num: num ? Number(num[0]) : 0, obs: c.slice(num ? 4 : 3).join(" | ") });
   });
 
   return itens;
@@ -328,7 +333,8 @@ async function traduzirTrecho(item) {
   }
 
   const pendentes = violacoes.map(v => "§" + v.num + " (" + v.regras.join(", ") + ")");
-  return { blocos, rodadas, glossario, pendentes };
+  const regrasPendentes = violacoes.map(v => ({ num: v.num, regras: v.regras }));
+  return { blocos, rodadas, glossario, pendentes, regrasPendentes };
 }
 
 
