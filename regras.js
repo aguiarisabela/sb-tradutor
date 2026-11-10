@@ -55,6 +55,8 @@ const CALCOS = [
   ["(?:olhar|olhos) (?:de \\p{L}+ )?sobre mim", "eyes on me → \"Penny olhando para mim\""],
   ["ofensa cortante", "cutting insult → \"alfinetada\", \"insulto afiado\""],
   ["c[êe]ntimos?", "nickel/dime/cents → \"centavos\" (\"cêntimo\" é de Portugal); apelido próprio fica como no original"],
+  ["reengast\\p{L}*", "reset (joia, pedra) → \"montar a pedra num engaste novo\", \"trocar o engaste\" (\"reengastar\" não existe)"],
+  ["retrein\\p{L}*|sobrepens\\p{L}*|sobreanalis\\p{L}*", "prefixo do inglês colado no verbo (re-, over-) → \"treinar de novo\", \"pensar demais\", \"analisar demais\""],
   ["(?:umas|as|algumas|duas) milhares", "a few thousand times → \"milhares de vezes\" (milhar é masculino: \"uns milhares\")"]
 ];
 const RE_CALCOS = CALCOS.map(([p, s]) => [palavra(p), s]);
@@ -95,6 +97,8 @@ const EXPRESSOES_EN = [
   [/\bheart sank\b|\bbutterflies\b/i, "heart sank / butterflies → \"aperto no peito\" / \"frio na barriga\""],
   [/\b\w+ fucking \w+/i, "fucking no meio da frase → palavrão como interjeição entre vírgulas, no início ou no fim (\"Eu não ligo, porra.\")"],
   [/(?:^|[“"\s])hell[,!]/i, "Hell, … → \"Inferno\" ou \"Porra\" (nunca \"Caramba\": não suavizar)"],
+  [/\bre-?set(?:s|ting)?\b/i, "reset: em joia/pedra → \"montar a pedra num engaste novo\", \"trocar o engaste\"; em aparelho → \"reiniciar\" (nunca \"reengastar\")"],
+  [/\bre-?(?:train|do|think|read|write|watch|start|open|build|make|set|mount|polish)(?:s|ed|ing)?\b|\bover(?:think|analy[sz]e|react|share)\w*/i, "verbo com re-/over- → verbo português + \"de novo\" ou \"demais\"; nunca invente palavra com prefixo (\"reengastar\", \"retreinar\", \"sobrepensar\")"],
   [/\bfuck\.? my\.? life\b/i, "Fuck. My. Life. → \"Que. Merda. De. Vida.\" (mantém o palavrão e as pausas)"]
 ];
 
