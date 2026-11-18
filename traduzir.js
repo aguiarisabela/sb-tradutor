@@ -201,20 +201,67 @@ function normalizarTexto(t) {
 }
 
 /**
- * Remove parágrafo repetido pela IA na mesma resposta (mesmo texto, ou mesmo começo
- * em parágrafo longo). Se a cópia ocupou o número de outro parágrafo, esse número
- * fica faltando e é pedido de novo pela conferência, como qualquer parágrafo faltando.
+ * Dois textos normalizados são o mesmo parágrafo? Iguais, ou (a partir de 12 palavras)
+ * tamanhos parecidos e pelo menos 85% das palavras em comum: pega a cópia que a IA
+ * reescreveu com pequenas diferenças. Fala curta nunca conta.
  */
-function semDuplicados(blocos) {
+function quaseIguais(a, b) {
+  const pa = a ? a.split(" ") : [];
+  const pb = b ? b.split(" ") : [];
+  if (Math.min(pa.length, pb.length) < 6) return false;
+  if (a === b) return true;
+  if (Math.min(pa.length, pb.length) < 12) return false;
+
+  const razao = pa.length / pb.length;
+  if (razao < 0.75 || razao > 1.33) return false;
+
+  const conta = lista => lista.reduce((m, w) => m.set(w, (m.get(w) || 0) + 1), new Map());
+  const ca = conta(pa), cb = conta(pb);
+  let comuns = 0;
+  ca.forEach((q, w) => { comuns += Math.min(q, cb.get(w) || 0); });
+  return comuns / Math.max(pa.length, pb.length) >= 0.85;
+}
+
+
+/**
+ * O original em inglês também repete o texto?
+ * - parágrafos diferentes com o mesmo texto, ou um contido no outro
+ *   ("Did Adrik order…?" e depois "I repeat the question: Did Adrik order…?");
+ * - ou o mesmo parágrafo com uma frase que aparece duas vezes dentro dele.
+ */
+function originalRepete(en, numA, numB) {
+  const a = normalizarTexto(regras.textoEN(en, numA));
+  const b = normalizarTexto(regras.textoEN(en, numB));
+  const contido = (x, y) => x.split(" ").length >= 6 && (" " + y + " ").includes(" " + x + " ");
+
+  if (numA !== numB) return quaseIguais(a, b) || contido(a, b) || contido(b, a);
+
+  const frases = regras.textoEN(en, numA).split(/(?<=[.!?…]["”’]?)\s+/).map(normalizarTexto)
+    .filter(f => f.split(" ").length >= 6);
+  return new Set(frases).size < frases.length;
+}
+
+
+/**
+ * Remove parágrafo repetido pela IA na mesma resposta.
+ * Repetição que existe no ORIGINAL é mantida: se os dois parágrafos do inglês também
+ * se repetem ("Did Adrik order the hit…?" duas vezes), a tradução repete também.
+ * Se a cópia ocupou o número de outro parágrafo, esse número fica faltando e é
+ * pedido de novo pela conferência, como qualquer parágrafo faltando.
+ */
+function semDuplicados(blocos, en) {
   const vistos = [];
   const saida = blocos.filter(b => {
     const n = normalizarTexto(b.texto);
     const palavras = n ? n.split(" ").length : 0;
     if (palavras < 6) return true; // fala curta ("— Sim.") pode se repetir de verdade
 
-    const repetido = vistos.some(v => v === n || (palavras >= 12 && v.length >= 80 && v.slice(0, 80) === n.slice(0, 80)));
-    vistos.push(n);
-    return !repetido;
+    const anterior = vistos.find(v => quaseIguais(v.n, n));
+    vistos.push({ n, num: b.num });
+    if (!anterior) return true;
+
+    // Repetição do próprio livro: o inglês também repete. Fica.
+    return originalRepete(en, anterior.num, b.num);
   });
 
   if (saida.length < blocos.length) log("Parágrafo repetido pela IA removido (" + (blocos.length - saida.length) + ").");
@@ -222,7 +269,7 @@ function semDuplicados(blocos) {
 }
 
 
-function lerResposta(texto) {
+function lerResposta(texto, en) {
   const blocos = [];
 
   String(texto || "").replace(/^```.*$/gm, "").split(/\r?\n/).forEach(linha => {
@@ -237,7 +284,7 @@ function lerResposta(texto) {
     }
   });
 
-  return semDuplicados(blocos);
+  return en ? semDuplicados(blocos, en) : blocos;
 }
 
 
@@ -292,7 +339,7 @@ async function traduzirTrecho(item) {
       const r = await chamarIA(item.config, item.instrucoes, msg + regras.lembreteFinal(), sessao);
       glossario.push(...lerGlossario(r.texto));
 
-      let novos = lerResposta(r.texto).filter(b => b.num >= inicio && b.num <= fim);
+      let novos = lerResposta(r.texto, item.en).filter(b => b.num >= inicio && b.num <= fim);
 
       // O último parágrafo de uma resposta cortada pode estar pela metade: descarta.
       if (r.cortado && novos.length) {
@@ -363,7 +410,7 @@ async function traduzirTrecho(item) {
       ", completos, no formato [número] texto. Não repita os demais.", sessao);
 
     glossario.push(...lerGlossario(r.texto));
-    return trocar(atuais, lerResposta(r.texto).filter(b => quer.has(b.num)));
+    return trocar(atuais, lerResposta(r.texto, item.en).filter(b => quer.has(b.num)));
   };
 
   let blocos = await pedir(item.pedido);
@@ -407,7 +454,7 @@ async function traduzirTrecho(item) {
 
     const r = await chamarIA(item.config, item.instrucoes, pedido + regras.lembreteFinal(), sessao);
     const quer = new Set(faltam);
-    const novos = lerResposta(r.texto).filter(b => quer.has(b.num));
+    const novos = lerResposta(r.texto, item.en).filter(b => quer.has(b.num));
     if (!novos.length) continue;
 
     blocos = blocos.concat(novos).sort((a, b) => a.num - b.num); // a ordem dentro do mesmo § se mantém
@@ -446,7 +493,7 @@ async function traduzirTrecho(item) {
       ).join("\n\n");
 
     const r = await chamarIA(item.config, item.instrucoes, pedido, sessao);
-    const corrigidos = regras.autocorrigir(lerResposta(r.texto).filter(b => nums.has(b.num)));
+    const corrigidos = regras.autocorrigir(lerResposta(r.texto, item.en).filter(b => nums.has(b.num)));
     const novos = trocar(blocos, corrigidos);
 
     const nova = await conferir(novos);
