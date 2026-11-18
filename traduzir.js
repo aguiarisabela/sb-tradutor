@@ -21,6 +21,7 @@ const INICIO = Date.now();
 let gastoUS = 0;
 let tokensEntrada = 0;
 let tokensCache = 0;
+let chamadasDoTrecho = []; // provedor e cache de cada chamada, para o registro
 let tokensSaida = 0;
 
 const esperar = ms => new Promise(r => setTimeout(r, ms));
@@ -91,10 +92,11 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           ],
           max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
-          // Mantém o livro no mesmo provedor, para aproveitar o cache.
-          // NÃO usar provider.sort/order aqui: eles desligam esse "grudar no provedor"
-          // e cada chamada cai num provedor diferente, sem cache.
           session_id: sessao,
+          // Sempre a própria DeepSeek, que guarda o cache entre as chamadas.
+          // Outro provedor só se a DeepSeek estiver fora do ar.
+          // Não usar "sort": ele faz cada chamada cair num provedor diferente, sem cache.
+          provider: { order: ["deepseek"], allow_fallbacks: true },
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
@@ -127,6 +129,10 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
         tokensEntrada += json.usage.prompt_tokens || 0;
         tokensCache += (json.usage.prompt_tokens_details && json.usage.prompt_tokens_details.cached_tokens) || 0;
         tokensSaida += json.usage.completion_tokens || 0;
+
+        const lidos = json.usage.prompt_tokens || 0;
+        const doCache = (json.usage.prompt_tokens_details && json.usage.prompt_tokens_details.cached_tokens) || 0;
+        chamadasDoTrecho.push((json.provider || "?") + " " + (lidos ? Math.round(100 * doCache / lidos) : 0) + "%");
       }
 
       // Cortada por tamanho: devolve o que veio; quem chamou pede a continuação.
@@ -474,8 +480,11 @@ async function traduzirTrecho(item) {
 
     const nova = await conferir(novos);
     if (!nova.grave && nova.alertas <= c.alertas) {
+      log("3C aceita: estilo de " + c.alertasEstilo + " para " + nova.alertasEstilo + " pendência(s).");
       blocos = novos;
       c = nova;
+    } else {
+      log("3C descartada (piorava a conferência). Estilo continua com " + c.alertasEstilo + " pendência(s).");
     }
   }
 
@@ -593,6 +602,7 @@ async function main() {
     const custoAntes = gastoUS;
     const entradaAntes = tokensEntrada;
     const cacheAntes = tokensCache;
+    chamadasDoTrecho = [];
     const saidaAntes = tokensSaida;
     log("Traduzindo: " + item.rotulo);
 
@@ -610,7 +620,8 @@ async function main() {
       const entrada = tokensEntrada - entradaAntes;
       if (entrada) {
         log("Leitura da skill e do pedido: " + entrada + " tokens, " +
-          Math.round(100 * (tokensCache - cacheAntes) / entrada) + "% com desconto de cache.");
+          Math.round(100 * (tokensCache - cacheAntes) / entrada) + "% com desconto de cache " +
+          "(por chamada: " + chamadasDoTrecho.join(" · ") + ").");
       }
 
       log("Resposta da IA: " + (tokensSaida - saidaAntes) + " tokens.");
