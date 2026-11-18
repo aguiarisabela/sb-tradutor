@@ -66,6 +66,8 @@ const RE_CALCOS = CALCOS.map(([p, s]) => [palavra(p), s]);
  * O código procura no inglês ANTES de traduzir e manda a orientação só quando a
  * expressão aparece no trecho (não aumenta o pedido dos trechos que não têm). */
 const EXPRESSOES_EN = [
+  [/^\s*(?:#+\s*)?(?:then|now)\s*(?:\.{3}|…|:)?\s*$/i, "\"Then…\" / \"Now…\" sozinhos na linha marcam o TEMPO da cena (passado/flashback x presente): Then → \"Antes…\" (ou \"Naquela época…\"); Now → \"Agora…\". Nunca \"Então…\". Use a mesma forma em todo o livro"],
+  [/\b[Ee]arth to \p{Lu}/u, "Earth to X → \"Terra chamando X\" ou \"Alô, X?\" (nunca \"Terra para X\")"],
   [/\bhigh[- ]?fives?\b/i, "high five → \"bater na mão\", \"toca aqui\" (nunca \"bater cinco\" nem \"um cinco\")"],
   [/\blaurels\b/i, "rest on one's laurels → \"dormir sobre os louros\""],
   [/\bmore often than not\b/i, "more often than not → \"na maioria das vezes\""],
