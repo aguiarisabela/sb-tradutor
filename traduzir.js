@@ -194,6 +194,34 @@ function partesDaLinha(texto) {
 }
 
 
+/** Texto comparável: sem maiúsculas, pontuação, travessões e marcas de itálico. */
+function normalizarTexto(t) {
+  return String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+/**
+ * Remove parágrafo repetido pela IA na mesma resposta (mesmo texto, ou mesmo começo
+ * em parágrafo longo). Se a cópia ocupou o número de outro parágrafo, esse número
+ * fica faltando e é pedido de novo pela conferência, como qualquer parágrafo faltando.
+ */
+function semDuplicados(blocos) {
+  const vistos = [];
+  const saida = blocos.filter(b => {
+    const n = normalizarTexto(b.texto);
+    const palavras = n ? n.split(" ").length : 0;
+    if (palavras < 6) return true; // fala curta ("— Sim.") pode se repetir de verdade
+
+    const repetido = vistos.some(v => v === n || (palavras >= 12 && v.length >= 80 && v.slice(0, 80) === n.slice(0, 80)));
+    vistos.push(n);
+    return !repetido;
+  });
+
+  if (saida.length < blocos.length) log("Parágrafo repetido pela IA removido (" + (blocos.length - saida.length) + ").");
+  return saida;
+}
+
+
 function lerResposta(texto) {
   const blocos = [];
 
@@ -209,7 +237,7 @@ function lerResposta(texto) {
     }
   });
 
-  return blocos;
+  return semDuplicados(blocos);
 }
 
 
