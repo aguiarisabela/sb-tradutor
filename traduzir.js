@@ -465,6 +465,7 @@ async function main() {
   let trechos = 0;
   let motivoFim = "";
   const refeitos = {};
+  const vistos = {};
 
   while (restante() > 0) {
     let item;
@@ -486,11 +487,29 @@ async function main() {
       continue;
     }
 
+    if (item.pausado) {
+      log("LIVRO PAUSADO: " + item.pausado);
+      continue;
+    }
+
     // Trava: a skill e o Doc de exemplos precisam chegar à IA. Se não chegarem, pausa o livro.
     const problema = regras.conferirInstrucoes(item.instrucoes, item.pedido);
     if (problema) {
       log("LIVRO PAUSADO: " + problema);
       await ponte("pausar", { originalId: item.originalId, mensagem: problema }).catch(() => {});
+      continue;
+    }
+
+    // Trava contra gasto à toa: trecho vazio, ou o mesmo trecho voltando sem avançar, não vai para a IA.
+    const chavePos = item.originalId + ":" + JSON.stringify(item.pos);
+    vistos[chavePos] = (vistos[chavePos] || 0) + 1;
+
+    if (!Array.isArray(item.en) || !item.en.length || vistos[chavePos] > 3) {
+      const msg = !Array.isArray(item.en) || !item.en.length
+        ? "trecho sem parágrafos em " + item.rotulo + ". Nada foi enviado à IA."
+        : "o mesmo trecho voltou " + vistos[chavePos] + " vezes sem avançar (" + item.rotulo + ").";
+      log("LIVRO PAUSADO: " + msg);
+      await ponte("pausar", { originalId: item.originalId, mensagem: msg }).catch(() => {});
       continue;
     }
 
