@@ -484,7 +484,28 @@ async function traduzirTrecho(item) {
       blocos = novos;
       c = nova;
     } else {
-      log("3C descartada (piorava a conferência). Estilo continua com " + c.alertasEstilo + " pendência(s).");
+      // Aproveita parágrafo por parágrafo: fica a versão nova só onde a conferência
+      // continuou 🟩/⬜ (ou igual à de antes); nos outros, volta a versão anterior.
+      const antes = Array.from(c.barra || "");
+      const depois = Array.from(nova.barra || "");
+      const bons = new Set();
+      for (let k = 1; k <= n; k++) {
+        const d = depois[k - 1];
+        if (d === "🟩" || d === "⬜" || d === antes[k - 1]) bons.add(k);
+      }
+
+      const mistura = blocos.filter(b => !bons.has(b.num))
+        .concat(novos.filter(b => bons.has(b.num)))
+        .sort((x, y) => x.num - y.num);
+      const conf = await conferir(mistura);
+
+      if (bons.size && !conf.grave && conf.alertas <= c.alertas) {
+        log("3C aceita em parte: estilo de " + c.alertasEstilo + " para " + conf.alertasEstilo + " pendência(s).");
+        blocos = mistura;
+        c = conf;
+      } else {
+        log("3C descartada (piorava a conferência). Estilo continua com " + c.alertasEstilo + " pendência(s).");
+      }
     }
   }
 
