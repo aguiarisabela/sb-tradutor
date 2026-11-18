@@ -91,8 +91,10 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           ],
           max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
-          session_id: sessao, // mantém o mesmo provedor e aproveita o cache
-          provider: { sort: "price" }, // mesmo modelo, no provedor mais barato (é mais lento)
+          // Mantém o livro no mesmo provedor, para aproveitar o cache.
+          // NÃO usar provider.sort/order aqui: eles desligam esse "grudar no provedor"
+          // e cada chamada cai num provedor diferente, sem cache.
+          session_id: sessao,
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
