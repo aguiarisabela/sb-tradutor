@@ -57,7 +57,10 @@ const CALCOS = [
   ["c[êe]ntimos?", "nickel/dime/cents → \"centavos\" (\"cêntimo\" é de Portugal); apelido próprio fica como no original"],
   ["reengast\\p{L}*", "reset (joia, pedra) → \"montar a pedra num engaste novo\", \"trocar o engaste\" (\"reengastar\" não existe)"],
   ["retrein\\p{L}*|sobrepens\\p{L}*|sobreanalis\\p{L}*", "prefixo do inglês colado no verbo (re-, over-) → \"treinar de novo\", \"pensar demais\", \"analisar demais\""],
-  ["(?:umas|as|algumas|duas) milhares", "a few thousand times → \"milhares de vezes\" (milhar é masculino: \"uns milhares\")"]
+  ["(?:umas|as|algumas|duas) milhares", "a few thousand times → \"milhares de vezes\" (milhar é masculino: \"uns milhares\")"],
+  ["revirt\\p{L}*", "revirar se conjuga como virar → \"reviro\", \"revira\", \"revirou\" (\"revirto\" não existe)"],
+  ["(?:respiração|fôlego) que (?:eu |ele |ela )?(?:nem )?(?:sabia|sabiam|percebi|percebeu)", "breath I didn't know I was holding → \"solto o ar que nem percebi que estava prendendo\""],
+  ["pul\\p{L}* uma batida", "skip a beat → \"disparar\" ou \"falhar\" (\"meu coração disparou\")"]
 ];
 const RE_CALCOS = CALCOS.map(([p, s]) => [palavra(p), s]);
 
@@ -101,6 +104,11 @@ const EXPRESSOES_EN = [
   [/(?:^|[“"\s])hell[,!]/i, "Hell, … → \"Inferno\" ou \"Porra\" (nunca \"Caramba\": não suavizar)"],
   [/\bre-?set(?:s|ting)?\b/i, "reset: em joia/pedra → \"montar a pedra num engaste novo\", \"trocar o engaste\"; em aparelho → \"reiniciar\" (nunca \"reengastar\")"],
   [/\bre-?(?:train|do|think|read|write|watch|start|open|build|make|set|mount|polish)(?:s|ed|ing)?\b|\bover(?:think|analy[sz]e|react|share)\w*/i, "verbo com re-/over- → verbo português + \"de novo\" ou \"demais\"; nunca invente palavra com prefixo (\"reengastar\", \"retreinar\", \"sobrepensar\")"],
+  [/\broll(?:s|ed|ing)? (?:my|his|her|their|your|our) eyes\b/i, "roll my eyes → \"reviro os olhos\" (revirar: reviro, revira, revirou; \"revirto\" não existe)"],
+  [/\b(?:hold|held|grab|get|got|open|pull)\w*\b[^.?!]{0,20}\b(?:her|his|my|your|their) (?:car |front |passenger )?(?:door|chair|seat)\b/i, "gesto de cortesia (hold/get her door, pull out her chair) → \"seguro a porta do carro para ela\", \"puxo a cadeira para ela\", nunca \"a porta dela\""],
+  [/\bbreath (?:i|he|she|we|they|you) (?:didn['’]?t|did not) (?:know|realize)/i, "breath I didn't know I was holding → \"solto o ar que nem percebi que estava prendendo\" (nunca \"uma respiração\")"],
+  [/\bskip(?:s|ped|ping)? a beat\b/i, "skip a beat → \"disparar\" ou \"falhar\""],
+  [/\b(?:smile|grin) (?:tugs?|pulls?|tugged|pulled)\b/i, "a smile tugs at my lips → \"abro um meio sorriso\", \"um sorriso me escapa\""],
   [/\bfuck\.? my\.? life\b/i, "Fuck. My. Life. → \"Que. Merda. De. Vida.\" (mantém o palavrão e as pausas)"]
 ];
 
