@@ -20,7 +20,8 @@ const TAMANHO_MINIMO_SKILL = 8000; // caracteres; abaixo disso a skill veio inco
 const AUTOCORRECOES = [
   [/\bOkay\b/g, "Ok"],
   [/\bokay\b/g, "ok"],
-  [/\bOKAY\b/g, "OK"]
+  [/\bOKAY\b/g, "OK"],
+  [/(?<!\p{L})([Ff])udid(?=[oa]s?(?!\p{L}))/gu, "$1odid"]
 ];
 
 
@@ -60,7 +61,16 @@ const CALCOS = [
   ["(?:umas|as|algumas|duas) milhares", "a few thousand times → \"milhares de vezes\" (milhar é masculino: \"uns milhares\")"],
   ["revirt\\p{L}*", "revirar se conjuga como virar → \"reviro\", \"revira\", \"revirou\" (\"revirto\" não existe)"],
   ["(?:respiração|fôlego) que (?:eu |ele |ela )?(?:nem )?(?:sabia|sabiam|percebi|percebeu)", "breath I didn't know I was holding → \"solto o ar que nem percebi que estava prendendo\""],
-  ["pul\\p{L}* uma batida", "skip a beat → \"disparar\" ou \"falhar\" (\"meu coração disparou\")"]
+  ["pul\\p{L}* uma batida", "skip a beat → \"disparar\" ou \"falhar\" (\"meu coração disparou\")"],
+  // Achados na análise de Untamed (MJ Hendrix)
+  ["cabeça de cabelo", "a head of hair → \"o cabelo\", \"os cabelos pretos\" (\"procuro alguém de cabelo preto\")"],
+  ["sorriso (?:\\p{L}+ )?se espalh\\p{L}*", "a smile spreads across her face → \"ela abre um sorriso\""],
+  ["se instal\\p{L}* (?:no|em) (?:meu|seu|nosso)? ?(?:estômago|peito)", "a feeling settles in my stomach → \"sinto um aperto no estômago\", \"o estômago embrulha\""],
+  ["não acho que (?:eu )?consig\\p{L}*", "I don't think I'll make it → \"acho que não consigo\", \"duvido que eu consiga\""],
+  ["(?:leva|levou|levar) \\p{L}+ (?:\\p{L}+ )?para outro (?:patamar|nível)", "take X to the next level → reestruture com sentido (\"o prefeito leva a sério demais esse posto de dono da cidade\")"],
+  ["de volta no", "be back at → \"de volta ao\", \"de volta à\""],
+  ["(?:os|meus|seus) músculos (?:tensos )?se relax\\p{L}*", "my muscles relax → \"relaxo\", \"meu corpo relaxa\""],
+  ["se dois de vocês", "if two of you → \"se vocês dois\""]
 ];
 const RE_CALCOS = CALCOS.map(([p, s]) => [palavra(p), s]);
 
@@ -109,8 +119,48 @@ const EXPRESSOES_EN = [
   [/\bbreath (?:i|he|she|we|they|you) (?:didn['’]?t|did not) (?:know|realize)/i, "breath I didn't know I was holding → \"solto o ar que nem percebi que estava prendendo\" (nunca \"uma respiração\")"],
   [/\bskip(?:s|ped|ping)? a beat\b/i, "skip a beat → \"disparar\" ou \"falhar\""],
   [/\b(?:smile|grin) (?:tugs?|pulls?|tugged|pulled)\b/i, "a smile tugs at my lips → \"abro um meio sorriso\", \"um sorriso me escapa\""],
-  [/\bfuck\.? my\.? life\b/i, "Fuck. My. Life. → \"Que. Merda. De. Vida.\" (mantém o palavrão e as pausas)"]
+  [/\bfuck\.? my\.? life\b/i, "Fuck. My. Life. → \"Que. Merda. De. Vida.\" (mantém o palavrão e as pausas)"],
+  [/\bhead of (?:\w+ )?hair\b/i, "a head of (dark) hair → \"o cabelo (escuro)\", nunca \"cabeça de cabelo\""],
+  [/\b(?:smile|grin) spreads?\b/i, "a smile spreads across her face → \"ela abre um sorriso\", nunca \"o sorriso se espalha\""],
+  [/\bto (?:a whole )?(?:new|the next|another) level\b/i, "take X to the next level → reestruture com o sentido real, nunca \"para outro patamar\""],
+  [/\bi don['’]?t think i(?:['’]ll| will| can)\b/i, "I don't think I'll… → \"acho que não vou…\", \"duvido que…\" (nunca \"Não acho que\")"]
 ];
+
+
+/* Camada Fantasia: vai junto das instruções quando a coluna "Estilo" da fila diz "fantasia".
+ * Base: seção 11 da skill tradutor-en-pt-br. */
+const CAMADA_FANTASIA = `
+
+=== CAMADA FANTASIA E PARANORMAL (este livro é de fantasia: aplique em todo o trecho) ===
+1. Termos sem tradução literal (raças, clãs, ordens, criaturas, feitiços, títulos, poderes, objetos mágicos): adapte de forma criativa e fluida, preservando sentido e tom, para que façam sentido à leitora brasileira e mantenham a imersão. Nome próprio de clã, raça, grupo, reino ou título criado pela autora mantém a identidade (não traduza nome próprio inventado).
+2. "sift", "glamoured", "apparate" e verbos mágicos parecidos: use o termo que dá o melhor sentido na frase, mantendo o tom fantástico. Exemplos: sift → "deslizar", "filtrar-se"; glamoured → "encantado", "disfarçado por magia"; apparate → "teletransportar-se", "materializar-se".
+3. Consistência é crítica: confira o glossário da obra antes de traduzir qualquer termo do universo. Se o termo já está lá, use exatamente a mesma solução. Se é novo, decida uma vez e registre em [G] (SEÇÃO | termo em inglês | tradução escolhida | nº do parágrafo | observação). Nunca alterne entre duas traduções do mesmo termo.
+4. Registro: fantasia pede vocabulário um pouco mais elevado e imagético na narração (sem ficar empolado), e falas de nobres, criaturas antigas ou seres mágicos podem soar mais formais se o original soa assim. Personagem jovem ou moderno continua falando natural.
+5. Títulos e tratamentos de corte: Lord/Lady → "lorde"/"lady"; Your Majesty → "Vossa Majestade"; Your Highness → "Vossa Alteza"; High Lord, High King e títulos inventados → adapte e mantenha fixo no glossário.
+6. Criaturas com nome consagrado em português usam a forma consagrada: fae → "feérico(a)" ou "fae" (escolha uma e fixe), shifter → "metamorfo", werewolf → "lobisomem", witch → "bruxa", warlock → "bruxo", mate → "parceiro(a)" ou "companheiro(a)" (fixe), bond → "vínculo", wards → "proteções", glamour → "ilusão" ou "encanto".
+7. Se um termo for realmente ambíguo e a escolha mudar a obra, registre em [G] com a observação, sem interromper o texto.
+`;
+
+/** Instruções completas para o estilo do livro (romance é o padrão; "fantasia" soma a camada). */
+function instrucoesDoEstilo(instrucoes, estilo) {
+  return /fantas|paranormal/i.test(String(estilo || "")) ? instrucoes + CAMADA_FANTASIA : instrucoes;
+}
+
+
+/* Refino editorial: segunda leitura de toda tradução, com o inglês ao lado.
+ * Lista curta e certeira: são os erros que mais aparecem nas revisões da SB. */
+const REFINO = `=== REFINO EDITORIAL ===
+Você é a revisora final de uma editora brasileira exigente. Abaixo estão o original e a tradução de cada parágrafo. Releia cada par e corrija o que soar traduzido. Confira, parágrafo por parágrafo:
+1. Sentido: nada mudou, faltou ou sobrou em relação ao inglês.
+2. Tempo verbal: o mesmo do original. Ação em curso no presente contínuo ("She's paying") → "está pagando". Diálogo que retoma o verbo da fala anterior precisa casar com ela.
+3. Calco: frase que segue a ordem e as palavras do inglês. Reescreva como uma autora brasileira escreveria ("a head of dark hair" → "o cabelo escuro"; "a smile spreads across his face" → "ele abre um sorriso"; "I don't think I'll make it" → "acho que não vou conseguir").
+4. Expressões idiomáticas: equivalente natural em português, nunca a tradução palavra por palavra.
+5. Possessivos e pronomes sobrando: corte "dele", "dela", "seu", "sua", "meu", "minha" e pronome sujeito quando o contexto já deixa claro ("Ele passa a mão no cabelo", não "Ele passa a mão dele no cabelo dele").
+6. Palavrão, xingamento e cena explícita com o mesmo peso do original: nada suavizado nem cortado ("dodged that fucking bullet" → "escapou dessa, porra").
+7. Ortografia e concordância (gênero de quem narra e de com quem se fala; "fodido", nunca "fudido").
+8. Fluidez: a frase lida em voz alta soa natural, sem repetição de palavra próxima (ex.: "cadeia" para prisão e "cadeia alimentar" na mesma frase).
+Mantenha o que já está bom: só reescreva o parágrafo que tiver problema, sem acrescentar conteúdo nem mudar o estilo da autora.
+Devolva SOMENTE os parágrafos que mudou, completos, no formato [número] texto. Mesma formatação (travessão, itálico com *, títulos com #). Se nenhum precisar de mudança, responda apenas: NENHUM.`;
 
 /** Orientações das expressões que aparecem neste trecho do original, com o número do parágrafo. */
 function dicasDoTrecho(en) {
@@ -278,4 +328,4 @@ function conferirInstrucoes(instrucoes, pedido) {
 }
 
 
-module.exports = { dicasDoTrecho, autocorrigir, checarRegras, lembreteFinal, conferirInstrucoes, textoEN, ajustarTitulos };
+module.exports = { REFINO, instrucoesDoEstilo, dicasDoTrecho, autocorrigir, checarRegras, lembreteFinal, conferirInstrucoes, textoEN, ajustarTitulos };
