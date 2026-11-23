@@ -6,6 +6,9 @@
  * e o Config continuam todos no Apps Script.
  *
  * Variáveis (Secrets do GitHub): PONTE_URL, PONTE_TOKEN, OPENROUTER_API_KEY.
+ * Uma execução por adm, ao mesmo tempo (variável ADM, vinda do workflow). Cada uma
+ * pega só os livros da sua adm na fila (coluna "Adm") e usa o Secret CHAVE_<NOME>
+ * (ex.: CHAVE_ANA_LUIZA). Sem ADM, funciona como antes: fila inteira, OPENROUTER_API_KEY.
  */
 
 const regras = require("./regras.js");
@@ -14,6 +17,8 @@ const limpar = v => String(v || "").trim().replace(/^["']|["']$/g, "").replace(/
 const PONTE_URL = limpar(process.env.PONTE_URL);
 const PONTE_TOKEN = limpar(process.env.PONTE_TOKEN);
 const OPENROUTER_API_KEY = limpar(process.env.OPENROUTER_API_KEY);
+const SEGREDOS = (() => { try { return JSON.parse(process.env.SEGREDOS || "{}"); } catch (e) { return {}; } })();
+const ADM = String(process.env.ADM || "").trim();
 const IA_URL = process.env.IA_URL || "https://openrouter.ai/api/v1/chat/completions";
 const LIMITE_MS = Number(process.env.LIMITE_MINUTOS || 340) * 60 * 1000;
 const INICIO = Date.now();
@@ -26,7 +31,7 @@ let tokensSaida = 0;
 
 const esperar = ms => new Promise(r => setTimeout(r, ms));
 const hora = () => new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
-const log = texto => console.log("[" + hora() + "] " + texto);
+const log = texto => console.log("[" + hora() + "]" + (ADM ? " [" + ADM + "]" : "") + " " + texto);
 
 function erro(tipo, mensagem) {
   return Object.assign(new Error(mensagem), { tipo });
@@ -36,12 +41,12 @@ function erro(tipo, mensagem) {
 /* ---------- Ponte com o Apps Script ---------- */
 
 async function ponte(acao, dados = {}) {
-  for (let tentativa = 1; tentativa <= 4; tentativa++) {
+  for (let tentativa = 1; tentativa <= 10; tentativa++) {
     try {
       const r = await fetch(PONTE_URL, {
         method: "POST",
         headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({ token: PONTE_TOKEN, acao, ...dados }),
+        body: JSON.stringify({ token: PONTE_TOKEN, acao, adm: ADM, ...dados }),
         redirect: "follow"
       });
 
@@ -61,7 +66,7 @@ async function ponte(acao, dados = {}) {
 
       log("Apps Script ocupado. Aguardando 1 min.");
     } catch (e) {
-      if (e.tipo && e.tipo !== "OCUPADO" || tentativa === 4) throw e;
+      if (e.tipo && e.tipo !== "OCUPADO" || tentativa === 10) throw e;
       log("Falha na ponte (" + e.message + "). Nova tentativa.");
     }
     await esperar(60000);
@@ -72,6 +77,17 @@ async function ponte(acao, dados = {}) {
 
 /* ---------- IA (OpenRouter) ---------- */
 
+/** Nome do Secret da adm: "Ana Júlia" → "CHAVE_ANA_JULIA". */
+const nomeDaChave = adm => "CHAVE_" + String(adm).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  .trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+
+/** Chave da adm, ou a geral se não houver adm. */
+function chaveDaAdm(adm) {
+  if (!String(adm || "").trim()) return OPENROUTER_API_KEY;
+  return limpar(SEGREDOS[nomeDaChave(adm)]);
+}
+const CHAVE = chaveDaAdm(ADM);
+
 async function chamarIA(config, instrucoes, mensagem, sessao) {
   for (let tentativa = 1; tentativa <= 5; tentativa++) {
     let r;
@@ -80,7 +96,7 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
       r = await fetch(IA_URL, {
         method: "POST",
         headers: {
-          Authorization: "Bearer " + OPENROUTER_API_KEY,
+          Authorization: "Bearer " + CHAVE,
           "Content-Type": "application/json",
           "x-session-id": sessao
         },
@@ -149,8 +165,8 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
       return { texto, cortado: false };
     }
 
-    if (r.status === 402) throw erro("COTA", "Créditos do OpenRouter esgotados.");
-    if (r.status === 401) throw erro("COTA", "Chave do OpenRouter recusada. Confira o Secret OPENROUTER_API_KEY.");
+    if (r.status === 402) throw erro("COTA", "Créditos do OpenRouter esgotados" + (ADM ? " da " + ADM : "") + ".");
+    if (r.status === 401) throw erro("COTA", "Chave do OpenRouter recusada. Confira o Secret " + (ADM ? nomeDaChave(ADM) : "OPENROUTER_API_KEY") + ".");
 
     if (r.status === 429 || r.status >= 500) {
       log("IA ocupada (HTTP " + r.status + "). Tentativa " + tentativa + ".");
@@ -473,40 +489,63 @@ async function traduzirTrecho(item) {
     throw erro("FALTA", "Ainda faltam os parágrafos §" + faltando(blocos).join(", §") + " depois de 3 tentativas.");
   }
 
+  // Aceita a versão nova se não piorar a 3B. Se piorar, aproveita parágrafo por parágrafo:
+  // fica a versão nova só onde a conferência continuou 🟩/⬜ (ou igual à de antes).
+  const aceitarSeMelhor = async (novos, nome) => {
+    const nova = await conferir(novos);
+    if (!nova.grave && nova.alertas <= c.alertas) {
+      log(nome + " aceito: estilo de " + c.alertasEstilo + " para " + nova.alertasEstilo + " pendência(s).");
+      blocos = novos;
+      c = nova;
+      return;
+    }
+
+    const antes = Array.from(c.barra || "");
+    const depois = Array.from(nova.barra || "");
+    const bons = new Set();
+    for (let k = 1; k <= n; k++) {
+      const d = depois[k - 1];
+      if (d === "🟩" || d === "⬜" || d === antes[k - 1]) bons.add(k);
+    }
+
+    const mistura = blocos.filter(b => !bons.has(b.num))
+      .concat(novos.filter(b => bons.has(b.num)))
+      .sort((x, y) => x.num - y.num);
+    const conf = await conferir(mistura);
+
+    if (bons.size && !conf.grave && conf.alertas <= c.alertas) {
+      log(nome + " aceito em parte: estilo de " + c.alertasEstilo + " para " + conf.alertasEstilo + " pendência(s).");
+      blocos = mistura;
+      c = conf;
+    } else {
+      log(nome + " descartado (piorava a conferência).");
+    }
+  };
+
+  // Refino editorial: segunda leitura com o inglês ao lado. Volta só o que mudou.
+  if (!c.grave) {
+    const pares = [];
+    for (let k = 1; k <= n; k++) {
+      pares.push("[" + k + "] EN: " + regras.textoEN(item.en, k) + "\n[" + k + "] PT: " +
+        blocos.filter(b => b.num === k).map(b => (b.nivel ? "#".repeat(b.nivel) + " " : "") + b.texto).join("\n"));
+    }
+
+    const r = await chamarIA(item.config, item.instrucoes, regras.REFINO + "\n\n" + pares.join("\n\n"), sessao);
+    const corrigidos = regras.autocorrigir(lerResposta(r.texto.replace(/^\[\d+\]\s*EN:.*$/gm, "").replace(/^(\[\d+\])\s*PT:\s*/gm, "$1 "), item.en));
+
+    if (corrigidos.length && !r.cortado) {
+      log("Refino: reescreveu §" + [...new Set(corrigidos.map(b => b.num))].join(", §") + ".");
+      await aceitarSeMelhor(trocar(blocos, corrigidos), "Refino");
+    } else {
+      log(r.cortado ? "Refino descartado (resposta cortada)." : "Refino: nada a mudar.");
+    }
+  }
+
   // 3C: uma reescrita de estilo, aceita só se não piorar a 3B.
   if (!c.grave && c.alertasEstilo) {
     const novos = await revisar(blocos, "CHECAGEM DE ESTILO (3C)", c.textoEstilo,
       "Reescreva só o que for vício de estilo (seções 6A e 6B), sem perder nem acrescentar conteúdo.");
-
-    const nova = await conferir(novos);
-    if (!nova.grave && nova.alertas <= c.alertas) {
-      log("3C aceita: estilo de " + c.alertasEstilo + " para " + nova.alertasEstilo + " pendência(s).");
-      blocos = novos;
-      c = nova;
-    } else {
-      // Aproveita parágrafo por parágrafo: fica a versão nova só onde a conferência
-      // continuou 🟩/⬜ (ou igual à de antes); nos outros, volta a versão anterior.
-      const antes = Array.from(c.barra || "");
-      const depois = Array.from(nova.barra || "");
-      const bons = new Set();
-      for (let k = 1; k <= n; k++) {
-        const d = depois[k - 1];
-        if (d === "🟩" || d === "⬜" || d === antes[k - 1]) bons.add(k);
-      }
-
-      const mistura = blocos.filter(b => !bons.has(b.num))
-        .concat(novos.filter(b => bons.has(b.num)))
-        .sort((x, y) => x.num - y.num);
-      const conf = await conferir(mistura);
-
-      if (bons.size && !conf.grave && conf.alertas <= c.alertas) {
-        log("3C aceita em parte: estilo de " + c.alertasEstilo + " para " + conf.alertasEstilo + " pendência(s).");
-        blocos = mistura;
-        c = conf;
-      } else {
-        log("3C descartada (piorava a conferência). Estilo continua com " + c.alertasEstilo + " pendência(s).");
-      }
-    }
+    await aceitarSeMelhor(novos, "3C");
   }
 
   // Trava das regras SB: confere por código e manda corrigir só os parágrafos que quebraram alguma regra.
@@ -565,8 +604,10 @@ function pedirContinuacao() {
 
 
 async function main() {
-  if (!PONTE_URL || !PONTE_TOKEN || !OPENROUTER_API_KEY) {
-    throw new Error("Faltam os Secrets PONTE_URL, PONTE_TOKEN ou OPENROUTER_API_KEY.");
+  if (!PONTE_URL || !PONTE_TOKEN) throw new Error("Faltam os Secrets PONTE_URL ou PONTE_TOKEN.");
+  if (!CHAVE) {
+    log("Sem chave: falta o Secret " + (ADM ? nomeDaChave(ADM) : "OPENROUTER_API_KEY") + ". Nada foi traduzido.");
+    return;
   }
 
   let trechos = 0;
@@ -606,6 +647,9 @@ async function main() {
       await ponte("pausar", { originalId: item.originalId, mensagem: problema }).catch(() => {});
       continue;
     }
+
+    // Regras do estilo do livro (coluna "Estilo" da fila).
+    item.instrucoes = regras.instrucoesDoEstilo(item.instrucoes, item.estilo);
 
     // Trava contra gasto à toa: trecho vazio, ou o mesmo trecho voltando sem avançar, não vai para a IA.
     const chavePos = item.originalId + ":" + JSON.stringify(item.pos);
@@ -653,7 +697,7 @@ async function main() {
       trechos++;
 
     } catch (e) {
-      // Créditos ou chave: não adianta insistir.
+      // Créditos ou chave: não adianta insistir (as outras adms seguem nas execuções delas).
       if (e.tipo === "COTA") {
         motivoFim = "PARADO: " + e.message + " Recarregue; a próxima execução continua de onde parou.";
         break;
