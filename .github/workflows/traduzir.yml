@@ -1,4 +1,5 @@
 name: Traduzir fila
+run-name: ${{ inputs.adm && format('Tradução — {0}', inputs.adm) || 'Disparar as adms' }}
 
 on:
   schedule:
@@ -6,7 +7,7 @@ on:
   workflow_dispatch:        # botão "Run workflow" para começar na hora
     inputs:
       adm:
-        description: "Só esta adm (vazio = todas)"
+        description: "Nome da adm (vazio = abre uma execução para cada adm)"
         required: false
         default: ""
 
@@ -15,17 +16,32 @@ permissions:
   actions: write
 
 jobs:
+  # A cada hora: abre uma execução separada para cada adm (cada uma com o seu histórico).
+  # Pula a adm que já está traduzindo.
+  disparar:
+    if: ${{ !inputs.adm }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Abrir uma execução por adm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for adm in "Ana Luiza" "Bianca" "Francielle" "Isabela" "Thaís"; do
+            ativa=""
+            for st in queued in_progress pending waiting; do
+              gh run list -w traduzir.yml -s "$st" --json displayTitle -q '.[].displayTitle' | grep -qx "Tradução — $adm" && ativa="sim"
+            done
+            if [ -n "$ativa" ]; then echo "$adm: já está traduzindo."; else gh workflow run traduzir.yml --ref main -f adm="$adm"; echo "$adm: execução aberta."; fi
+          done
+
   traduzir:
+    if: ${{ inputs.adm }}
     runs-on: ubuntu-latest
     timeout-minutes: 355
-    # Uma tradução por adm, todas ao mesmo tempo. Cada uma pega só os livros dela.
-    strategy:
-      fail-fast: false
-      matrix:
-        adm: ${{ fromJSON(inputs.adm && format('["{0}"]', inputs.adm) || '["Ana Luiza","Bianca","Francielle","Isabela","Thaís"]') }}
     # A mesma adm nunca roda duas vezes ao mesmo tempo.
     concurrency:
-      group: traducao-${{ matrix.adm }}
+      group: traducao-${{ inputs.adm }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
@@ -44,7 +60,7 @@ jobs:
           PONTE_TOKEN: ${{ secrets.PONTE_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SEGREDOS: ${{ toJSON(secrets) }}   # chaves das adms (ANA_LUIZA, BIANCA...)
-          ADM: ${{ matrix.adm }}
+          ADM: ${{ inputs.adm }}
 
       # Registra a execução no repositório. Sem atividade por 60 dias,
       # o GitHub desliga o agendamento de repositórios públicos.
@@ -61,6 +77,6 @@ jobs:
       # Acabou o tempo (5h40) sem problema de crédito: começa a próxima execução na hora.
       - name: Continuar
         if: steps.traduzir.outputs.continuar == 'true'
-        run: gh workflow run traduzir.yml --ref main -f adm="${{ matrix.adm }}"
+        run: gh workflow run traduzir.yml --ref main -f adm="${{ inputs.adm }}"
         env:
           GH_TOKEN: ${{ github.token }}
