@@ -17,7 +17,6 @@ const limpar = v => String(v || "").trim().replace(/^["']|["']$/g, "").replace(/
 const PONTE_URL = limpar(process.env.PONTE_URL);
 const PONTE_TOKEN = limpar(process.env.PONTE_TOKEN);
 const OPENROUTER_API_KEY = limpar(process.env.OPENROUTER_API_KEY);
-const SEGREDOS = (() => { try { return JSON.parse(process.env.SEGREDOS || "{}"); } catch (e) { return {}; } })();
 const ADM = String(process.env.ADM || "").trim();
 const IA_URL = process.env.IA_URL || "https://openrouter.ai/api/v1/chat/completions";
 const LIMITE_MS = Number(process.env.LIMITE_MINUTOS || 340) * 60 * 1000;
@@ -84,7 +83,7 @@ const nomeDaChave = adm => /^isabela$/i.test(String(adm).trim()) ? "OPENROUTER_A
 /** Chave da adm, ou a geral se não houver adm. */
 function chaveDaAdm(adm) {
   if (!String(adm || "").trim() || nomeDaChave(adm) === "OPENROUTER_API_KEY") return OPENROUTER_API_KEY;
-  return limpar(SEGREDOS[nomeDaChave(adm)]);
+  return limpar(process.env[nomeDaChave(adm)]);
 }
 const CHAVE = chaveDaAdm(ADM);
 
