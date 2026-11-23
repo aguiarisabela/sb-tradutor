@@ -59,7 +59,10 @@ jobs:
           PONTE_URL: ${{ secrets.PONTE_URL }}
           PONTE_TOKEN: ${{ secrets.PONTE_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          SEGREDOS: ${{ toJSON(secrets) }}   # chaves das adms (ANA_LUIZA, BIANCA...)
+          ANA_LUIZA: ${{ secrets.ANA_LUIZA }}
+          BIANCA: ${{ secrets.BIANCA }}
+          FRANCIELLE: ${{ secrets.FRANCIELLE }}
+          THAIS: ${{ secrets.THAIS }}
           ADM: ${{ inputs.adm }}
 
       # Registra a execução no repositório. Sem atividade por 60 dias,
