@@ -4,10 +4,11 @@ on:
   schedule:
     - cron: "17 * * * *"    # toda hora, aos 17 min (se já estiver rodando, espera na fila)
   workflow_dispatch:        # botão "Run workflow" para começar na hora
-
-concurrency:
-  group: traducao
-  cancel-in-progress: false
+    inputs:
+      adm:
+        description: "Só esta adm (vazio = todas)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -17,6 +18,15 @@ jobs:
   traduzir:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    # Uma tradução por adm, todas ao mesmo tempo. Cada uma pega só os livros dela.
+    strategy:
+      fail-fast: false
+      matrix:
+        adm: ${{ fromJSON(inputs.adm && format('["{0}"]', inputs.adm) || '["Ana Luiza","Bianca","Franciele","Isabela","Thaís"]') }}
+    # A mesma adm nunca roda duas vezes ao mesmo tempo.
+    concurrency:
+      group: traducao-${{ matrix.adm }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
         with:
@@ -33,6 +43,8 @@ jobs:
           PONTE_URL: ${{ secrets.PONTE_URL }}
           PONTE_TOKEN: ${{ secrets.PONTE_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SEGREDOS: ${{ toJSON(secrets) }}   # chaves das adms (CHAVE_NOME)
+          ADM: ${{ matrix.adm }}
 
       # Registra a execução no repositório. Sem atividade por 60 dias,
       # o GitHub desliga o agendamento de repositórios públicos.
@@ -44,12 +56,11 @@ jobs:
           git config user.email "41898341+github-actions[bot]@users.noreply.github.com"
           git add ultima-execucao.txt
           git commit -m "Registro de execução" || true
-          git pull --rebase -X theirs || true
-          git push || true
+          for i in 1 2 3; do git pull --rebase -X theirs && git push && break; sleep $((RANDOM % 10 + 5)); done || true
 
       # Acabou o tempo (5h40) sem problema de crédito: começa a próxima execução na hora.
       - name: Continuar
         if: steps.traduzir.outputs.continuar == 'true'
-        run: gh workflow run traduzir.yml --ref main
+        run: gh workflow run traduzir.yml --ref main -f adm="${{ matrix.adm }}"
         env:
           GH_TOKEN: ${{ github.token }}
