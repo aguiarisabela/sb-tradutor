@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        adm: ${{ fromJSON(inputs.adm && format('["{0}"]', inputs.adm) || '["Ana Luiza","Bianca","Franciele","Isabela","Thaís"]') }}
+        adm: ${{ fromJSON(inputs.adm && format('["{0}"]', inputs.adm) || '["Ana Luiza","Bianca","Francielle","Isabela","Thaís"]') }}
     # A mesma adm nunca roda duas vezes ao mesmo tempo.
     concurrency:
       group: traducao-${{ matrix.adm }}
@@ -43,7 +43,7 @@ jobs:
           PONTE_URL: ${{ secrets.PONTE_URL }}
           PONTE_TOKEN: ${{ secrets.PONTE_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          SEGREDOS: ${{ toJSON(secrets) }}   # chaves das adms (CHAVE_NOME)
+          SEGREDOS: ${{ toJSON(secrets) }}   # chaves das adms (ANA_LUIZA, BIANCA...)
           ADM: ${{ matrix.adm }}
 
       # Registra a execução no repositório. Sem atividade por 60 dias,
