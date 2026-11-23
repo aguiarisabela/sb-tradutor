@@ -7,8 +7,8 @@
  *
  * Variáveis (Secrets do GitHub): PONTE_URL, PONTE_TOKEN, OPENROUTER_API_KEY.
  * Uma execução por adm, ao mesmo tempo (variável ADM, vinda do workflow). Cada uma
- * pega só os livros da sua adm na fila (coluna "Adm") e usa o Secret CHAVE_<NOME>
- * (ex.: CHAVE_ANA_LUIZA). Sem ADM, funciona como antes: fila inteira, OPENROUTER_API_KEY.
+ * pega só os livros da sua adm na fila (coluna "Adm") e usa o Secret com o nome dela
+ * (ex.: ANA_LUIZA). A Isabela usa OPENROUTER_API_KEY. Sem ADM, funciona como antes.
  */
 
 const regras = require("./regras.js");
@@ -77,13 +77,13 @@ async function ponte(acao, dados = {}) {
 
 /* ---------- IA (OpenRouter) ---------- */
 
-/** Nome do Secret da adm: "Ana Júlia" → "CHAVE_ANA_JULIA". */
-const nomeDaChave = adm => "CHAVE_" + String(adm).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+/** Nome do Secret da adm: "Ana Luiza" → "ANA_LUIZA"; a Isabela usa OPENROUTER_API_KEY. */
+const nomeDaChave = adm => /^isabela$/i.test(String(adm).trim()) ? "OPENROUTER_API_KEY" : String(adm).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
   .trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 
 /** Chave da adm, ou a geral se não houver adm. */
 function chaveDaAdm(adm) {
-  if (!String(adm || "").trim()) return OPENROUTER_API_KEY;
+  if (!String(adm || "").trim() || nomeDaChave(adm) === "OPENROUTER_API_KEY") return OPENROUTER_API_KEY;
   return limpar(SEGREDOS[nomeDaChave(adm)]);
 }
 const CHAVE = chaveDaAdm(ADM);
