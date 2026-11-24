@@ -111,7 +111,7 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           // Sempre a própria DeepSeek, que guarda o cache entre as chamadas.
           // Outro provedor só se a DeepSeek estiver fora do ar.
           // Não usar "sort": ele faz cada chamada cair num provedor diferente, sem cache.
-          provider: { order: ["deepseek"], allow_fallbacks: true },
+          provider: { sort: "price" },   // sempre o provedor mais barato (a Wafer chegou a custar 3x mais)
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
