@@ -551,8 +551,9 @@ async function traduzirTrecho(item) {
     }
   }
 
-  // 3C separada só de reserva: quando o refino não rodou (resposta cortada).
-  if (!refinado && !c.grave && c.alertasEstilo) {
+  // 3C separada só de reserva: quando o refino não rodou (resposta cortada)
+  // ou quando ainda sobraram muitas pendências de estilo (mais de 5).
+  if (!c.grave && c.alertasEstilo && (!refinado || c.alertasEstilo > 5)) {
     const novos = await revisar(blocos, "CHECAGEM DE ESTILO (3C)", c.textoEstilo,
       "Reescreva só o que for vício de estilo (seções 6A e 6B), sem perder nem acrescentar conteúdo.");
     await aceitarSeMelhor(novos, "3C");
