@@ -1,5 +1,5 @@
 name: Traduzir fila
-run-name: ${{ inputs.adm && format('Tradução — {0}', inputs.adm) || 'Disparar as adms' }}
+run-name: ${{ (inputs.adm && inputs.adm != 'todas') && format('Tradução — {0}', inputs.adm) || 'Disparar as adms' }}
 
 on:
   schedule:
@@ -7,9 +7,11 @@ on:
   workflow_dispatch:        # botão "Run workflow" para começar na hora
     inputs:
       adm:
-        description: "Nome da adm (vazio = abre uma execução para cada adm)"
+        description: "Adm (todas = abre uma execução para cada adm)"
+        type: choice
         required: false
-        default: ""
+        default: todas
+        options: [todas, Ana Luiza, Bianca, Francielle, Isabela, Thaís]
 
 permissions:
   contents: write
@@ -19,7 +21,7 @@ jobs:
   # A cada hora: abre uma execução separada para cada adm (cada uma com o seu histórico).
   # Pula a adm que já está traduzindo.
   disparar:
-    if: ${{ !inputs.adm }}
+    if: ${{ !inputs.adm || inputs.adm == 'todas' }}
     runs-on: ubuntu-latest
     steps:
       - name: Abrir uma execução por adm
@@ -36,7 +38,7 @@ jobs:
           done
 
   traduzir:
-    if: ${{ inputs.adm }}
+    if: ${{ inputs.adm && inputs.adm != 'todas' }}
     runs-on: ubuntu-latest
     timeout-minutes: 355
     # A mesma adm nunca roda duas vezes ao mesmo tempo.
