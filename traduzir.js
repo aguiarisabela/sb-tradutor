@@ -526,7 +526,9 @@ async function traduzirTrecho(item) {
     }
   };
 
-  // Refino editorial: segunda leitura com o inglês ao lado. Volta só o que mudou.
+  // Refino editorial + 3C numa chamada só: segunda leitura com o inglês ao lado, já
+  // levando as pendências de estilo da 3C. Volta só o que mudou.
+  let refinado = false;
   if (!c.grave) {
     const pares = [];
     for (let k = 1; k <= n; k++) {
@@ -534,19 +536,23 @@ async function traduzirTrecho(item) {
         blocos.filter(b => b.num === k).map(b => (b.nivel ? "#".repeat(b.nivel) + " " : "") + b.texto).join("\n"));
     }
 
-    const r = await chamarIA(item.config, item.instrucoes, regras.REFINO + "\n\n" + pares.join("\n\n"), sessao);
+    const estilo = c.alertasEstilo
+      ? "\n\nPENDÊNCIAS DE ESTILO (3C) — resolva também, nos parágrafos indicados:\n" + c.textoEstilo
+      : "";
+    const r = await chamarIA(item.config, item.instrucoes, regras.REFINO + estilo + "\n\n" + pares.join("\n\n"), sessao);
     const corrigidos = regras.autocorrigir(lerResposta(r.texto.replace(/^\[\d+\]\s*EN:.*$/gm, "").replace(/^(\[\d+\])\s*PT:\s*/gm, "$1 "), item.en));
 
+    refinado = !r.cortado;
     if (corrigidos.length && !r.cortado) {
-      log("Refino: reescreveu §" + [...new Set(corrigidos.map(b => b.num))].join(", §") + ".");
+      log("Refino (com 3C): reescreveu §" + [...new Set(corrigidos.map(b => b.num))].join(", §") + ".");
       await aceitarSeMelhor(trocar(blocos, corrigidos), "Refino");
     } else {
       log(r.cortado ? "Refino descartado (resposta cortada)." : "Refino: nada a mudar.");
     }
   }
 
-  // 3C: uma reescrita de estilo, aceita só se não piorar a 3B.
-  if (!c.grave && c.alertasEstilo) {
+  // 3C separada só de reserva: quando o refino não rodou (resposta cortada).
+  if (!refinado && !c.grave && c.alertasEstilo) {
     const novos = await revisar(blocos, "CHECAGEM DE ESTILO (3C)", c.textoEstilo,
       "Reescreva só o que for vício de estilo (seções 6A e 6B), sem perder nem acrescentar conteúdo.");
     await aceitarSeMelhor(novos, "3C");
