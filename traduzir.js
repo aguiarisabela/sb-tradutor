@@ -28,6 +28,14 @@ let tokensCache = 0;
 let chamadasDoTrecho = []; // provedor e cache de cada chamada, para o registro
 let tokensSaida = 0;
 
+/* Provedor escolhido pelo custo REAL medido em cada trecho (o preço de tabela do
+ * OpenRouter não bate com a cobrança: a Baidu às vezes sai 5x mais barata que a tabela,
+ * às vezes cobra a tabela cheia). A DeepInfra é estável e serve de régua. */
+let provedor = "baidu";
+let baiduCaraAte = 0;        // até quando evitar a Baidu
+let regua = 0.0006;          // US$ por mil tokens de resposta na DeepInfra (atualiza com o medido)
+let porProvedor = {};        // custo e tokens de resposta do trecho atual, por provedor
+
 const esperar = ms => new Promise(r => setTimeout(r, ms));
 const hora = () => new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
 const log = texto => console.log("[" + hora() + "]" + (ADM ? " [" + ADM + "]" : "") + " " + texto);
@@ -76,6 +84,24 @@ async function ponte(acao, dados = {}) {
 
 /* ---------- IA (OpenRouter) ---------- */
 
+/** Depois de cada trecho: se a Baidu saiu mais cara que a DeepInfra, usa a DeepInfra por 1 hora
+ *  e depois testa a Baidu de novo. */
+function escolherProvedor() {
+  const porMil = p => p && p.saida > 5000 ? 1000 * p.custo / p.saida : 0;
+  const deepinfra = porMil(porProvedor.deepinfra);
+  const baidu = porMil(porProvedor.baidu);
+
+  if (deepinfra) regua = deepinfra;
+  if (baidu > regua) {
+    baiduCaraAte = Date.now() + 60 * 60 * 1000;
+    log("Baidu cara agora (US$ " + baidu.toFixed(5) + " contra " + regua.toFixed(5) + " por mil tokens). DeepInfra pela próxima hora.");
+  }
+
+  const novo = Date.now() < baiduCaraAte ? "deepinfra" : "baidu";
+  if (novo !== provedor) log("Provedor dos próximos trechos: " + (novo === "baidu" ? "Baidu (testando de novo)" : "DeepInfra") + ".");
+  provedor = novo;
+}
+
 /** Nome do Secret da adm: "Ana Luiza" → "ANA_LUIZA"; a Isabela usa OPENROUTER_API_KEY. */
 const nomeDaChave = adm => /^isabela$/i.test(String(adm).trim()) ? "OPENROUTER_API_KEY" : String(adm).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
   .trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
@@ -108,14 +134,8 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
           session_id: sessao,
-          // O mais barato do momento, pelo preço ao vivo do OpenRouter (muda sozinho quando um
-          // provedor entra ou sai de promoção). Só versões de qualidade boa (fp8 ou melhor: nada
-          // de fp4, como a Wafer). Teto por milhão de tokens: provedor acima disso fica de fora.
-          provider: {
-            sort: "price",
-            quantizations: ["fp8", "bf16", "fp16"],
-            max_price: { prompt: 0.3, completion: 0.8 }
-          },
+          // O escolhido pelo custo medido; o outro só se o escolhido estiver fora do ar.
+          provider: { order: provedor === "baidu" ? ["baidu", "deepinfra"] : ["deepinfra", "baidu"], allow_fallbacks: false },
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
@@ -151,6 +171,10 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
 
         const lidos = json.usage.prompt_tokens || 0;
         const doCache = (json.usage.prompt_tokens_details && json.usage.prompt_tokens_details.cached_tokens) || 0;
+        const nome = String(json.provider || "?").toLowerCase();
+        porProvedor[nome] = porProvedor[nome] || { custo: 0, saida: 0 };
+        porProvedor[nome].custo += json.usage.cost || 0;
+        porProvedor[nome].saida += json.usage.completion_tokens || 0;
         chamadasDoTrecho.push((json.provider || "?") + " " + (lidos ? Math.round(100 * doCache / lidos) : 0) + "%");
       }
 
@@ -679,6 +703,7 @@ async function main() {
     const entradaAntes = tokensEntrada;
     const cacheAntes = tokensCache;
     chamadasDoTrecho = [];
+    porProvedor = {};
     const saidaAntes = tokensSaida;
     log("Traduzindo: " + item.rotulo);
 
@@ -706,6 +731,7 @@ async function main() {
         " · total desta execução: US$ " + gastoUS.toFixed(4));
 
       trechos++;
+      escolherProvedor();
 
     } catch (e) {
       // Créditos ou chave: não adianta insistir (as outras adms seguem nas execuções delas).
