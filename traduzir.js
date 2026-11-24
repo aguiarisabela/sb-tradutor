@@ -108,12 +108,14 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
           session_id: sessao,
-          // Sempre a própria DeepSeek, que guarda o cache entre as chamadas.
-          // Outro provedor só se a DeepSeek estiver fora do ar.
-          // Não usar "sort": ele faz cada chamada cair num provedor diferente, sem cache.
-          // Baidu primeiro: na prática sai uns 3x mais barata que a Wafer (tem desconto que a
-          // ordenação por preço do OpenRouter não enxerga). Reserva: DeepInfra. Nunca fp4 (perde qualidade).
-          provider: { order: ["baidu", "deepinfra"], allow_fallbacks: true, quantizations: ["fp8", "bf16", "fp16", "unknown"] },
+          // O mais barato do momento, pelo preço ao vivo do OpenRouter (muda sozinho quando um
+          // provedor entra ou sai de promoção). Só versões de qualidade boa (fp8 ou melhor: nada
+          // de fp4, como a Wafer). Teto por milhão de tokens: provedor acima disso fica de fora.
+          provider: {
+            sort: "price",
+            quantizations: ["fp8", "bf16", "fp16"],
+            max_price: { prompt: 0.3, completion: 0.8 }
+          },
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
@@ -169,7 +171,8 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
     if (r.status === 402) throw erro("COTA", "Créditos do OpenRouter esgotados" + (ADM ? " da " + ADM : "") + ".");
     if (r.status === 401) throw erro("COTA", "Chave do OpenRouter recusada. Confira o Secret " + (ADM ? nomeDaChave(ADM) : "OPENROUTER_API_KEY") + ".");
 
-    if (r.status === 429 || r.status >= 500) {
+    // 404 "sem provedor disponível" = a Baidu está fora agora: trata como ocupada.
+    if (r.status === 429 || r.status >= 500 || (r.status === 404 && /endpoint|provider/i.test(corpo))) {
       log("IA ocupada (HTTP " + r.status + "). Tentativa " + tentativa + ".");
       await esperar(30000 * tentativa);
       continue;
