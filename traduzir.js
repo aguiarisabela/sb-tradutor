@@ -111,7 +111,9 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           // Sempre a própria DeepSeek, que guarda o cache entre as chamadas.
           // Outro provedor só se a DeepSeek estiver fora do ar.
           // Não usar "sort": ele faz cada chamada cair num provedor diferente, sem cache.
-          provider: { sort: "price" },   // sempre o provedor mais barato (a Wafer chegou a custar 3x mais)
+          // Baidu primeiro: na prática sai uns 3x mais barata que a Wafer (tem desconto que a
+          // ordenação por preço do OpenRouter não enxerga). Reserva: DeepInfra. Nunca fp4 (perde qualidade).
+          provider: { order: ["baidu", "deepinfra"], allow_fallbacks: true, quantizations: ["fp8", "bf16", "fp16", "unknown"] },
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
