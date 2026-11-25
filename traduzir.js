@@ -141,8 +141,12 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
           session_id: sessao,
-          // O escolhido pelo custo medido; o outro só se o escolhido estiver fora do ar.
-          provider: { order: provedor === "baidu" ? ["baidu", "deepinfra"] : ["deepinfra", "baidu"], allow_fallbacks: false },
+          // Cache é por provedor: nas 2 primeiras tentativas fica só no escolhido (espera e tenta
+          // de novo); o outro provedor entra só se o escolhido continuar fora do ar.
+          provider: {
+            order: tentativa <= 2 ? [provedor] : provedor === "baidu" ? ["baidu", "deepinfra"] : ["deepinfra", "baidu"],
+            allow_fallbacks: false
+          },
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
