@@ -47,6 +47,10 @@ function erro(tipo, mensagem) {
 
 /* ---------- Ponte com o Apps Script ---------- */
 
+// "gravar" escreve no Doc: se a resposta se perder, o texto pode já estar lá.
+// Por isso ele NUNCA é reenviado às cegas (reenviar duplicaria o trecho no Doc).
+const ACOES_QUE_ESCREVEM = new Set(["gravar"]);
+
 async function ponte(acao, dados = {}) {
   for (let tentativa = 1; tentativa <= 10; tentativa++) {
     try {
@@ -74,6 +78,9 @@ async function ponte(acao, dados = {}) {
       log("Apps Script ocupado. Aguardando 1 min.");
     } catch (e) {
       if (e.tipo && e.tipo !== "OCUPADO" || tentativa === 10) throw e;
+      if (ACOES_QUE_ESCREVEM.has(acao)) {
+        throw erro("INCERTO", "a ponte falhou durante a gravação (" + e.message + "). O trecho pode já estar no Doc.");
+      }
       log("Falha na ponte (" + e.message + "). Nova tentativa.");
     }
     await esperar(60000);
@@ -752,6 +759,14 @@ async function main() {
 
         log("LIVRO PAUSADO: " + e.message);
         await ponte("pausar", { originalId: item.originalId, mensagem: e.message }).catch(() => {});
+        continue;
+      }
+
+      // Gravação sem confirmação: pausa o livro em vez de traduzir e gravar de novo.
+      if (e.tipo === "INCERTO") {
+        const msg = "Gravação incerta em " + item.rotulo + ": " + e.message + " Confira o fim do Doc antes de retomar.";
+        log("LIVRO PAUSADO: " + msg);
+        await ponte("pausar", { originalId: item.originalId, mensagem: msg }).catch(() => {});
         continue;
       }
 
