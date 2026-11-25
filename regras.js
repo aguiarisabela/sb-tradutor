@@ -158,7 +158,8 @@ Você é a revisora final de uma editora brasileira exigente. Abaixo estão o or
 5. Possessivos e pronomes sobrando: corte "dele", "dela", "seu", "sua", "meu", "minha" e pronome sujeito quando o contexto já deixa claro ("Ele passa a mão no cabelo", não "Ele passa a mão dele no cabelo dele").
 6. Palavrão, xingamento e cena explícita com o mesmo peso do original: nada suavizado nem cortado ("dodged that fucking bullet" → "escapou dessa, porra").
 7. Ortografia e concordância (gênero de quem narra e de com quem se fala; "fodido", nunca "fudido").
-8. Fluidez: a frase lida em voz alta soa natural, sem repetição de palavra próxima (ex.: "cadeia" para prisão e "cadeia alimentar" na mesma frase).
+8. Fala: a fala de um mesmo personagem num parágrafo nunca se divide em dois travessões seguidos; depois da narração, ela continua no mesmo bloco ("— Obrigado — murmuro. — Amo você.").
+9. Fluidez: a frase lida em voz alta soa natural, sem repetição de palavra próxima (ex.: "cadeia" para prisão e "cadeia alimentar" na mesma frase).
 Mantenha o que já está bom: só reescreva o parágrafo que tiver problema, sem acrescentar conteúdo nem mudar o estilo da autora.
 Devolva SOMENTE os parágrafos que mudou, completos, no formato [número] texto. Mesma formatação (travessão, itálico com *, títulos com #). Se nenhum precisar de mudança, responda apenas: NENHUM.`;
 
@@ -202,7 +203,8 @@ const REGRAS = [
   // Fala de verdade no original: parágrafo que abre com aspas, ou aspas fechando depois de , ? ! …
   // (aspas de ênfase, título ou placa não contam).
   { nome: "fala sem travessão", teste: (pt, en) => temFala(en) && !/—/.test(pt),
-    instrucao: "O original tem fala entre aspas: em português, fala vai com travessão no início da linha, nunca aspas nem discurso indireto (\"— Oi — ela diz.\"). Se o mesmo parágrafo tiver narração e fala, separe em blocos com o mesmo número: [7] Ela desligou. / [7] — Droga." }
+    instrucao: "O original tem fala entre aspas: em português, fala vai com travessão no início da linha, nunca aspas nem discurso indireto (\"— Oi — ela diz.\"). Se o mesmo parágrafo tiver narração e fala, separe em blocos com o mesmo número: [7] Ela desligou. / [7] — Droga. " +
+      "Mas a fala de UM personagem nunca se divide em dois travessões seguidos (parece que outra pessoa respondeu): continue no mesmo bloco depois da narração (\"— Wilder? — ela pergunta, sonolenta. — Você está bem?\")." }
 ];
 
 
@@ -219,9 +221,30 @@ function textoEN(en, num) {
 }
 
 
+/**
+ * Fala do mesmo personagem quebrada em dois travessões seguidos, no mesmo §:
+ * "— Wilder? — A voz dela vem do lado." + "— Você está bem?" vira um bloco só.
+ * Se o bloco anterior termina na narração (nº ímpar de " — " internos), continua com " — ";
+ * se termina dentro da fala, só tira o travessão do seguinte.
+ */
+function juntarFalaDividida(blocos) {
+  const fala = t => /^\*{0,3}— /.test(t);
+  return blocos.reduce((saida, b) => {
+    const ant = saida[saida.length - 1];
+    if (ant && ant.num === b.num && !ant.nivel && !b.nivel && fala(ant.texto) && fala(b.texto)) {
+      const terminaNaNarracao = (ant.texto.match(/\s—\s/g) || []).length % 2 === 1;
+      ant.texto += " " + (terminaNaNarracao ? b.texto : b.texto.replace(/^(\*{0,3})— /, "$1"));
+      return saida;
+    }
+    saida.push({ ...b });
+    return saida;
+  }, []);
+}
+
+
 /** Aplica as autocorreções. Devolve os blocos corrigidos. */
 function autocorrigir(blocos) {
-  return blocos.map(b => {
+  return juntarFalaDividida(blocos).map(b => {
     let t = b.texto;
     AUTOCORRECOES.forEach(([de, para]) => { t = t.replace(de, para); });
     return { ...b, texto: t };
