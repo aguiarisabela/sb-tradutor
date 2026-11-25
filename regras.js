@@ -200,6 +200,13 @@ const REGRAS = [
   { nome: "travessão na narração", teste: pt => pt.split("\n").some(l => !/^\*{0,3}—/.test(l.trim()) && /\s—\s/.test(l)), // linha a linha: narração e fala podem vir em blocos separados
     instrucao: "Travessão só em diálogo. Na narração, troque por vírgula, ponto e vírgula, dois-pontos, reticências ou parênteses." },
 
+  // Imagem no meio do texto do original (emoji, ícone): o Apps Script manda como [IMG1], [IMG2]…
+  { nome: "imagem perdida", teste: (pt, en) => {
+      const marcas = t => (String(t).match(/\[IMG\d+\]/g) || []).sort().join(" ");
+      return marcas(en) !== marcas(pt);
+    },
+    instrucao: "Marcadores [IMG1], [IMG2]… são imagens do livro (emoji, ícone): copie cada um exatamente igual, no mesmo lugar da frase, sem traduzir, mover ou remover." },
+
   // Fala de verdade no original: parágrafo que abre com aspas, ou aspas fechando depois de , ? ! …
   // (aspas de ênfase, título ou placa não contam).
   { nome: "fala sem travessão", teste: (pt, en) => temFala(en) && !/—/.test(pt),
