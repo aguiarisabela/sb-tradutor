@@ -1,895 +1,448 @@
 /**
- * Tradutor SB — roda no GitHub Actions, sem depender do seu PC.
+ * Regras SB conferidas por código — a "trava" da skill.
  *
- * Faz as chamadas à IA (OpenRouter) e usa a "ponte" do Apps Script
- * para ler e gravar no Google Docs. As regras, a fila, o glossário
- * e o Config continuam todos no Apps Script.
+ * Toda regra aqui é checada em TODO trecho, sem depender da IA lembrar.
+ * O que quebrar uma regra volta para a IA corrigir (só aquele parágrafo).
  *
- * Variáveis (Secrets do GitHub): PONTE_URL, PONTE_TOKEN, OPENROUTER_API_KEY.
- * Uma execução por adm, ao mesmo tempo (variável ADM, vinda do workflow). Cada uma
- * pega só os livros da sua adm na fila (coluna "Adm") e usa o Secret com o nome dela
- * (ex.: ANA_LUIZA). A Isabela usa OPENROUTER_API_KEY. Sem ADM, funciona como antes.
+ * Para acrescentar uma regra: copie uma linha de REGRAS e troque
+ * o nome, o padrão (regex) e a instrução.
  */
 
-const regras = require("./regras.js");
-const fs = require("fs");
-
-const limpar = v => String(v || "").trim().replace(/^["']|["']$/g, "").replace(/^Bearer\s+/i, "");
-const PONTE_URL = limpar(process.env.PONTE_URL);
-const PONTE_TOKEN = limpar(process.env.PONTE_TOKEN);
-const OPENROUTER_API_KEY = limpar(process.env.OPENROUTER_API_KEY);
-const ADM = String(process.env.ADM || "").trim();
-const IA_URL = process.env.IA_URL || "https://openrouter.ai/api/v1/chat/completions";
-const LIMITE_MS = Number(process.env.LIMITE_MINUTOS || 340) * 60 * 1000;
-const INICIO = Date.now();
-
-let gastoUS = 0;
-let tokensEntrada = 0;
-let tokensCache = 0;
-let chamadasDoTrecho = []; // provedor e cache de cada chamada, para o registro
-let tokensSaida = 0;
-
-/* Provedor escolhido pelo custo REAL medido em cada trecho (o preço de tabela do
- * OpenRouter não bate com a cobrança: a Baidu às vezes sai 5x mais barata que a tabela,
- * às vezes cobra a tabela cheia). A DeepInfra é estável e serve de régua. */
-let provedor = "baidu";
-let baiduCaraAte = 0;        // até quando evitar a Baidu
-let regua = 0.0006;          // US$ por mil tokens de resposta na DeepInfra (atualiza com o medido)
-let porProvedor = {};        // custo e tokens de resposta do trecho atual, por provedor
-
-/* ---------- Custo de cada livro (soma todas as execuções) ----------
- * Fica em custos/<adm>.json, salvo no GitHub no fim de cada execução (passo "Registrar execução").
- * Um arquivo por adm: execuções de adms diferentes não brigam pelo mesmo arquivo. */
-const ARQ_CUSTOS = "custos/" + (ADM.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-  .replace(/[^\w]+/g, "-").toLowerCase() || "isabela") + ".json";
-let custos = {};
-try { custos = JSON.parse(fs.readFileSync(ARQ_CUSTOS, "utf8")); } catch (e) { custos = {}; }
-const livrosDaExecucao = new Set();
-
-/** Soma o custo do trecho no livro e salva. Devolve o total do livro até agora. */
-function somarCusto(item, valor) {
-  const nome = String(item.rotulo || "").split(" · ")[0];
-  const chave = item.originalId || nome;
-  const c = custos[chave] = custos[chave] || { nome, usd: 0, trechos: 0 };
-  c.usd += valor;
-  c.trechos++;
-  c.modelo = item.config && item.config.modelo;
-  livrosDaExecucao.add(chave);
-  try {
-    fs.mkdirSync("custos", { recursive: true });
-    fs.writeFileSync(ARQ_CUSTOS, JSON.stringify(custos, null, 2));
-  } catch (e) { /* registro de custo não pode parar a tradução */ }
-  return c;
-}
-
-/** Livro concluído: mostra o total gasto nele, somando todas as execuções. */
-function totalDoLivro(item) {
-  const texto = String(item.concluido || "");
-  const chave = Object.keys(custos).find(k =>
-    k === item.originalId || (custos[k].nome && texto.indexOf(custos[k].nome) >= 0));
-  const c = chave && custos[chave];
-  if (!c || c.concluido) return;
-
-  c.concluido = new Date().toISOString().slice(0, 10);
-  livrosDaExecucao.add(chave);
-  try { fs.writeFileSync(ARQ_CUSTOS, JSON.stringify(custos, null, 2)); } catch (e) {}
-  log("CUSTO TOTAL DO LIVRO " + c.nome + ": US$ " + c.usd.toFixed(4) + " em " + c.trechos +
-    " trecho(s)" + (c.modelo ? " · modelo " + c.modelo : "") + ".");
-}
-
-const esperar = ms => new Promise(r => setTimeout(r, ms));
-const hora = () => new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
-const log = texto => console.log("[" + hora() + "]" + (ADM ? " [" + ADM + "]" : "") + " " + texto);
-
-function erro(tipo, mensagem) {
-  return Object.assign(new Error(mensagem), { tipo });
-}
+/* Marcas que precisam estar nas instruções enviadas à IA.
+ * Se faltar alguma, o livro pausa: a skill ou o Doc de exemplos não chegou. */
+const MARCAS_OBRIGATORIAS = [
+  { marca: "PARTE 4", nome: "Doc \"Exemplos e erros SB\" (Parte 4 — preferências)" }
+];
+const TAMANHO_MINIMO_SKILL = 8000; // caracteres; abaixo disso a skill veio incompleta
 
 
-/* ---------- Ponte com o Apps Script ---------- */
-
-// "gravar" escreve no Doc: se a resposta se perder, o texto pode já estar lá.
-// Por isso ele NUNCA é reenviado às cegas (reenviar duplicaria o trecho no Doc).
-const ACOES_QUE_ESCREVEM = new Set(["gravar"]);
-
-async function ponte(acao, dados = {}) {
-  for (let tentativa = 1; tentativa <= 10; tentativa++) {
-    try {
-      const r = await fetch(PONTE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({ token: PONTE_TOKEN, acao, adm: ADM, ...dados }),
-        redirect: "follow"
-      });
-
-      const texto = await r.text();
-      let json;
-      try {
-        json = JSON.parse(texto);
-      } catch {
-        // Página de erro do Google: mostra só o texto legível (a mensagem do erro).
-        const legivel = texto.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ")
-          .replace(/<[^>]+>/g, " ").replace(/&[a-z#0-9]+;/gi, " ").replace(/\s+/g, " ").trim();
-        throw new Error("Resposta inesperada da ponte (HTTP " + r.status + "): " + legivel.slice(0, 400));
-      }
-
-      if (json.erro && json.tipo !== "OCUPADO") throw erro(json.tipo || "PONTE", json.erro);
-      if (!json.erro) return json;
-
-      log("Apps Script ocupado. Aguardando 1 min.");
-    } catch (e) {
-      if (e.tipo && e.tipo !== "OCUPADO" || tentativa === 10) throw e;
-      if (ACOES_QUE_ESCREVEM.has(acao)) {
-        throw erro("INCERTO", "a ponte falhou durante a gravação (" + e.message + "). O trecho pode já estar no Doc.");
-      }
-      log("Falha na ponte (" + e.message + "). Nova tentativa.");
-    }
-    await esperar(60000);
-  }
-  throw erro("PONTE", "A ponte não respondeu.");
-}
+/* Correções automáticas, seguras, feitas sem chamar a IA. */
+const AUTOCORRECOES = [
+  [/\bOkay\b/g, "Ok"],
+  [/\bokay\b/g, "ok"],
+  [/\bOKAY\b/g, "OK"],
+  [/(?<!\p{L})([Ff])udid(?=[oa]s?(?!\p{L}))/gu, "$1odid"]
+];
 
 
-/* ---------- IA (OpenRouter) ---------- */
-
-/** O modelo do CONFIG é DeepSeek? (só ele usa a escolha Baidu/DeepInfra) */
-function ehDeepSeek(modelo) {
-  return /deepseek/i.test(String(modelo || ""));
-}
-
-/** Depois de cada trecho: se a Baidu saiu mais cara que a DeepInfra, usa a DeepInfra por 1 hora
- *  e depois testa a Baidu de novo. */
-function escolherProvedor(modelo) {
-  if (!ehDeepSeek(modelo)) return;
-  const porMil = p => p && p.saida > 5000 ? 1000 * p.custo / p.saida : 0;
-  const deepinfra = porMil(porProvedor.deepinfra);
-  const baidu = porMil(porProvedor.baidu);
-
-  if (deepinfra) regua = deepinfra;
-  if (baidu > regua) {
-    baiduCaraAte = Date.now() + 60 * 60 * 1000;
-    log("Baidu cara agora (US$ " + baidu.toFixed(5) + " contra " + regua.toFixed(5) + " por mil tokens). DeepInfra pela próxima hora.");
-  }
-
-  const novo = Date.now() < baiduCaraAte ? "deepinfra" : "baidu";
-  if (novo !== provedor) log("Provedor dos próximos trechos: " + (novo === "baidu" ? "Baidu (testando de novo)" : "DeepInfra") + ".");
-  provedor = novo;
-}
-
-/** Nome do Secret da adm: "Ana Luiza" → "ANA_LUIZA"; a Isabela usa OPENROUTER_API_KEY. */
-const nomeDaChave = adm => /^isabela$/i.test(String(adm).trim()) ? "OPENROUTER_API_KEY" : String(adm).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-  .trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-
-/** Chave da adm, ou a geral se não houver adm. */
-function chaveDaAdm(adm) {
-  if (!String(adm || "").trim() || nomeDaChave(adm) === "OPENROUTER_API_KEY") return OPENROUTER_API_KEY;
-  return limpar(process.env[nomeDaChave(adm)]);
-}
-const CHAVE = chaveDaAdm(ADM);
-
-async function chamarIA(config, instrucoes, mensagem, sessao) {
-  for (let tentativa = 1; tentativa <= 5; tentativa++) {
-    let r;
-
-    try {
-      r = await fetch(IA_URL, {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer " + CHAVE,
-          "Content-Type": "application/json",
-          "x-session-id": sessao
-        },
-        body: JSON.stringify({
-          model: config.modelo,
-          messages: [
-            { role: "system", content: instrucoes },
-            { role: "user", content: mensagem }
-          ],
-          max_tokens: Number(config.maxTokens) || 32000,
-          reasoning: { effort: config.esforco || "low" },
-          session_id: sessao,
-          // Só no DeepSeek: cache é por provedor; nas 2 primeiras tentativas fica só no escolhido
-          // (espera e tenta de novo); o outro provedor entra só se o escolhido continuar fora do ar.
-          // Outros modelos (ex.: GPT) usam o provedor padrão do OpenRouter, com cache automático.
-          ...(ehDeepSeek(config.modelo) && {
-            provider: {
-              order: tentativa <= 2 ? [provedor] : provedor === "baidu" ? ["baidu", "deepinfra"] : ["deepinfra", "baidu"],
-              allow_fallbacks: false
-            }
-          }),
-          usage: { include: true }
-        }),
-        signal: AbortSignal.timeout(15 * 60 * 1000)
-      });
-    } catch (e) {
-      log("IA sem resposta (" + e.message + "). Tentativa " + tentativa + ".");
-      await esperar(20000 * tentativa);
-      continue;
-    }
-
-    // A conexão pode cair no meio da resposta ("terminated"): tenta de novo aqui mesmo.
-    let corpo;
-    try {
-      corpo = await r.text();
-    } catch (e) {
-      log("Conexão com a IA caiu no meio da resposta (" + e.message + "). Tentativa " + tentativa + ".");
-      await esperar(20000 * tentativa);
-      continue;
-    }
-
-    if (r.status === 200) {
-      const json = JSON.parse(corpo);
-      if (json.error) throw new Error("OpenRouter: " + JSON.stringify(json.error).slice(0, 300));
-
-      const c = (json.choices || [])[0] || {};
-      const texto = (c.message && c.message.content) || "";
-
-      if (json.usage && json.usage.cost) gastoUS += json.usage.cost;
-      if (json.usage) {
-        tokensEntrada += json.usage.prompt_tokens || 0;
-        tokensCache += (json.usage.prompt_tokens_details && json.usage.prompt_tokens_details.cached_tokens) || 0;
-        tokensSaida += json.usage.completion_tokens || 0;
-
-        const lidos = json.usage.prompt_tokens || 0;
-        const doCache = (json.usage.prompt_tokens_details && json.usage.prompt_tokens_details.cached_tokens) || 0;
-        const nome = String(json.provider || "?").toLowerCase();
-        porProvedor[nome] = porProvedor[nome] || { custo: 0, saida: 0 };
-        porProvedor[nome].custo += json.usage.cost || 0;
-        porProvedor[nome].saida += json.usage.completion_tokens || 0;
-        chamadasDoTrecho.push((json.provider || "?") + " " + (lidos ? Math.round(100 * doCache / lidos) : 0) + "%");
-      }
-
-      // Cortada por tamanho: devolve o que veio; quem chamou pede a continuação.
-      if (c.finish_reason === "length") return { texto, cortado: true };
-      if (c.finish_reason === "content_filter") throw erro("BLOQUEIO", "A IA recusou o trecho (filtro de conteúdo).");
-
-      // Falha passageira do provedor: resposta vazia ou interrompida. Tenta de novo.
-      if (!texto.trim() || c.finish_reason === "error") {
-        log("IA devolveu resposta vazia (motivo: " + c.finish_reason + "). Tentativa " + tentativa + ".");
-        await esperar(30000 * tentativa);
-        continue;
-      }
-
-      return { texto, cortado: false };
-    }
-
-    if (r.status === 402) throw erro("COTA", "Créditos do OpenRouter esgotados" + (ADM ? " da " + ADM : "") + ".");
-    if (r.status === 401) throw erro("COTA", "Chave do OpenRouter recusada. Confira o Secret " + (ADM ? nomeDaChave(ADM) : "OPENROUTER_API_KEY") + ".");
-
-    // 404 "sem provedor disponível" = a Baidu está fora agora: trata como ocupada.
-    if (r.status === 429 || r.status >= 500 || (r.status === 404 && /endpoint|provider/i.test(corpo))) {
-      log("IA ocupada (HTTP " + r.status + "). Tentativa " + tentativa + ".");
-      await esperar(30000 * tentativa);
-      continue;
-    }
-
-    throw new Error("IA HTTP " + r.status + ": " + corpo.slice(0, 500));
-  }
-
-  throw erro("INDISPONIVEL", "A IA não respondeu depois de 5 tentativas.");
-}
+/* Palavra inteira, aceitando acentos (o \b do JavaScript não entende "tá" ou "né"). */
+const palavra = (lista, flags = "iu") => new RegExp("(?<!\\p{L})(" + lista + ")(?!\\p{L})", flags);
 
 
-/* ---------- Leitura da resposta (igual ao Trechos.gs) ---------- */
+/* O parágrafo em inglês tem fala (e não só aspas de ênfase)? */
+const temFala = en => /^\s*\*{0,3}["“]/.test(en) || /[.,?!…\u2014\-]\*{0,3}["”]/.test(en);
 
-/**
- * Pontuação de diálogo no padrão SB:
- * - travessão de fala é sempre "—" (troca "–", "―", "−" e "-" usados no lugar dele);
- * - travessão colado em palavra vira reticências ("eu—e—não sei" → "eu… e… não sei").
- */
-function corrigirPontuacao(texto) {
-  let t = texto.replace(/^(\*{0,3})[–―−-]\s*/, "$1— ");
+/** Quantas falas (trechos entre aspas) o parágrafo do inglês tem. */
+const falasEN = en => (String(en).match(/[“"][^“”"]*\p{L}[^“”"]*[”"]/gu) || []).length;
 
-  // Dentro da fala (bloco que começa com travessão), o intercalado também vira "—".
-  if (/^\*{0,3}— /.test(t)) t = t.replace(/\s[–―−-]\s/g, " — ");
-
-  return t
-    .replace(/(\p{L})[—–](?=\p{L})/gu, "$1… ")
-    .replace(/(\p{L})[—–](?=$|[”"*?!.,])/gu, "$1…");
-}
-
-
-/**
- * "# Capítulo 1" → { nivel: 1, texto: "Capítulo 1" }. Sem "#", nivel 0 (texto comum).
- * Aceita as variações que a IA às vezes devolve: "**## Penny**", "##Penny", "\\#\\# Penny".
- */
-function separarTitulo(texto) {
-  const t = texto.replace(/\\#/g, "#");
-  const m = t.match(/^[*_]*\s*(#{1,6})\s*(.+)$/);
-  return m
-    ? { nivel: Math.min(m[1].length, 4), texto: corrigirPontuacao(m[2].replace(/^[*_]+|[*_]+$/g, "").trim()) }
-    : { nivel: 0, texto: corrigirPontuacao(texto) };
-}
-
-/** "# Capítulo 2 ## Penny" na mesma linha → dois títulos. */
-function partesDaLinha(texto) {
-  return /^[*_]*\s*\\?#/.test(texto) ? texto.split(/\s+(?=\\?#{1,6}\s*\S)/) : [texto];
-}
-
-
-/** Texto comparável: sem maiúsculas, pontuação, travessões e marcas de itálico. */
-function normalizarTexto(t) {
-  return String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-}
-
-/**
- * Dois textos normalizados são o mesmo parágrafo? Iguais, ou (a partir de 12 palavras)
- * tamanhos parecidos e pelo menos 85% das palavras em comum: pega a cópia que a IA
- * reescreveu com pequenas diferenças. Fala curta nunca conta.
- */
-function quaseIguais(a, b) {
-  const pa = a ? a.split(" ") : [];
-  const pb = b ? b.split(" ") : [];
-  if (Math.min(pa.length, pb.length) < 6) return false;
-  if (a === b) return true;
-  if (Math.min(pa.length, pb.length) < 12) return false;
-
-  const razao = pa.length / pb.length;
-  if (razao < 0.75 || razao > 1.33) return false;
-
-  const conta = lista => lista.reduce((m, w) => m.set(w, (m.get(w) || 0) + 1), new Map());
-  const ca = conta(pa), cb = conta(pb);
-  let comuns = 0;
-  ca.forEach((q, w) => { comuns += Math.min(q, cb.get(w) || 0); });
-  return comuns / Math.max(pa.length, pb.length) >= 0.85;
-}
-
-
-/**
- * O original em inglês também repete o texto?
- * - parágrafos diferentes com o mesmo texto, ou um contido no outro
- *   ("Did Adrik order…?" e depois "I repeat the question: Did Adrik order…?");
- * - ou o mesmo parágrafo com uma frase que aparece duas vezes dentro dele.
- */
-function originalRepete(en, numA, numB) {
-  const a = normalizarTexto(regras.textoEN(en, numA));
-  const b = normalizarTexto(regras.textoEN(en, numB));
-  const contido = (x, y) => x.split(" ").length >= 6 && (" " + y + " ").includes(" " + x + " ");
-
-  if (numA !== numB) return quaseIguais(a, b) || contido(a, b) || contido(b, a);
-
-  const frases = regras.textoEN(en, numA).split(/(?<=[.!?…]["”’]?)\s+/).map(normalizarTexto)
-    .filter(f => f.split(" ").length >= 6);
-  return new Set(frases).size < frases.length;
-}
-
-
-/**
- * Remove parágrafo repetido pela IA na mesma resposta.
- * Repetição que existe no ORIGINAL é mantida: se os dois parágrafos do inglês também
- * se repetem ("Did Adrik order the hit…?" duas vezes), a tradução repete também.
- * Se a cópia ocupou o número de outro parágrafo, esse número fica faltando e é
- * pedido de novo pela conferência, como qualquer parágrafo faltando.
- */
-function semDuplicados(blocos, en) {
-  const vistos = [];
-  const saida = blocos.filter(b => {
-    const n = normalizarTexto(b.texto);
-    const palavras = n ? n.split(" ").length : 0;
-    if (palavras < 6) return true; // fala curta ("— Sim.") pode se repetir de verdade
-
-    const anterior = vistos.find(v => quaseIguais(v.n, n));
-    vistos.push({ n, num: b.num });
-    if (!anterior) return true;
-
-    // Repetição do próprio livro: o inglês também repete. Fica.
-    return originalRepete(en, anterior.num, b.num);
+/** Quantas falas (trechos depois de travessão) a tradução tem. */
+function falasPT(pt) {
+  let n = 0;
+  String(pt).split("\n").forEach(linha => {
+    const l = linha.trim().replace(/^\*+/, "");
+    if (!/^—/.test(l)) return;
+    l.replace(/^—\s*/, "").split(/\s—\s/).forEach((parte, i) => { if (i % 2 === 0 && /\p{L}/u.test(parte)) n++; });
   });
-
-  if (saida.length < blocos.length) log("Parágrafo repetido pela IA removido (" + (blocos.length - saida.length) + ").");
-  return saida;
+  return n;
 }
 
+const contarPalavras = t => (String(t).replace(/\[IMG\d+\]/g, "").match(/[\p{L}\d'’]+/gu) || []).length;
 
-function lerResposta(texto, en) {
-  const blocos = [];
-
-  String(texto || "").replace(/^```.*$/gm, "").split(/\r?\n/).forEach(linha => {
-    const l = linha.trim();
-    if (!l || /^\[G\]/i.test(l)) return;
-
-    const m = l.match(/^\[(\d+)\]\s*(.*)$/);
-    if (m) {
-      if (m[2].trim()) partesDaLinha(m[2].trim()).forEach(p => blocos.push({ num: Number(m[1]), ...separarTitulo(p) }));
-    } else if (blocos.length) {
-      partesDaLinha(l).forEach(p => blocos.push({ num: blocos[blocos.length - 1].num, ...separarTitulo(p) }));
-    }
-  });
-
-  return en ? semDuplicados(blocos, en) : blocos;
-}
-
-
-function lerGlossario(texto) {
-  const itens = [];
-
-  String(texto || "").split(/\r?\n/).forEach(linha => {
-    // [G] SEÇÃO | inglês | decisão | nº do parágrafo | observação
-    const m = linha.trim().match(/^\[G\]\s*(.+)$/i);
-    if (!m) return;
-    const c = m[1].split("|").map(x => x.trim());
-    if (c.length < 3 || !c[1]) return;
-    const num = (c[3] || "").match(/\d+/);
-    itens.push({ secao: c[0], termo: c[1], decisao: c[2], num: num ? Number(num[0]) : 0, obs: c.slice(num ? 4 : 3).join(" | ") });
-  });
-
-  return itens;
-}
-
-
-/* ---------- Ciclo de um trecho (mesmas regras da skill) ---------- */
-
-function melhorOuIgual(nova, atual) {
-  if (nova.grave !== atual.grave) return !nova.grave;
-  if (nova.falta !== atual.falta) return nova.falta < atual.falta;
-  return nova.alertas <= atual.alertas;
-}
-
-
-async function traduzirTrecho(item) {
-  const sessao = "sb-" + item.originalId;
-  const glossario = [];
-
-  // Expressões do original que costumam virar calco: a orientação vai junto, só quando aparecem.
-  const dicas = regras.dicasDoTrecho(item.en);
-  if (dicas) item.pedido += dicas;
-  const n = item.en.length;
-  const versao = blocos => blocos.map(b => "[" + b.num + "] " + b.texto).join("\n");
-
-  // Pede à IA e, se a resposta vier cortada por tamanho, continua de onde parou:
-  // guarda só os parágrafos completos e pede o resto, sem cortar parágrafo no meio.
-  const pedir = async (mensagem, de = 1, ate = n) => {
-    const blocos = [];
-    let inicio = de;
-    let fim = ate;
-
-    for (let parte = 1; parte <= 8; parte++) {
-      const msg = inicio === de && fim === ate ? mensagem : mensagem +
-        "\n\n=== CONTINUAÇÃO ===\nOs parágrafos de [" + de + "] a [" + (inicio - 1) + "] já foram recebidos. " +
-        "Devolva SOMENTE de [" + inicio + "] a [" + fim + "], no mesmo formato, sem repetir os anteriores.";
-
-      const r = await chamarIA(item.config, item.instrucoes, msg + regras.lembreteFinal(), sessao);
-      glossario.push(...lerGlossario(r.texto));
-
-      let novos = lerResposta(r.texto, item.en).filter(b => b.num >= inicio && b.num <= fim);
-
-      // O último parágrafo de uma resposta cortada pode estar pela metade: descarta.
-      if (r.cortado && novos.length) {
-        const ultimo = novos[novos.length - 1].num;
-        novos = novos.filter(b => b.num !== ultimo);
-      }
-
-      blocos.push(...novos);
-      const recebidoAte = novos.length ? novos[novos.length - 1].num : inicio - 1;
-
-      if (!r.cortado) {
-        if (fim === ate) return blocos;
-        inicio = Math.max(recebidoAte, fim) + 1; // terminou a metade pedida; segue para o resto
-        fim = ate;
-        continue;
-      }
-
-      if (recebidoAte >= inicio) {
-        log("Resposta longa: recebido até [" + recebidoAte + "] de [" + ate + "]. Continuando de onde parou.");
-        inicio = recebidoAte + 1;
-      } else {
-        // Nada completo veio: pede metade do que falta.
-        if (fim <= inicio) throw erro("LONGO", "Um único parágrafo passou do limite de resposta da IA.");
-        fim = inicio + Math.floor((fim - inicio) / 2);
-        log("Resposta longa sem parágrafo completo. Pedindo de [" + inicio + "] a [" + fim + "].");
-      }
-    }
-
-    throw erro("LONGO", "A resposta continuou cortada depois de 8 partes.");
+/** Quantas vezes o parágrafo alterna entre fala (F) e narração (N). */
+function trechosEN(en) {
+  const seq = [];
+  let dentro = false, atual = "";
+  const fecha = () => {
+    if (/\p{L}/u.test(atual)) { const t = dentro ? "F" : "N"; if (seq[seq.length - 1] !== t) seq.push(t); }
+    atual = "";
   };
+  for (const c of String(en)) {
+    if (c === "“" || (c === '"' && !dentro)) { fecha(); dentro = true; }
+    else if (c === "”" || (c === '"' && dentro)) { fecha(); dentro = false; }
+    else atual += c;
+  }
+  fecha();
+  return seq.length;
+}
 
-  const conferir = blocos => ponte("conferir", { en: item.en, blocos, nomes: item.nomes });
-
-  // Troca só os parágrafos que voltaram; o resto fica como estava (a ordem dentro do mesmo § se mantém).
-  const trocar = (atuais, corrigidos) => {
-    const recebidos = new Set(corrigidos.map(b => b.num));
-    return atuais.filter(b => !recebidos.has(b.num)).concat(corrigidos).sort((a, b) => a.num - b.num);
-  };
-
-  // Números de parágrafo citados num relatório da checagem ("§12" ou "[12]").
-  const apontados = texto => {
-    const nums = new Set();
-    String(texto || "").replace(/(?:§|\[)\s*(\d+)/g, (_, k) => {
-      k = Number(k);
-      if (k >= 1 && k <= n) nums.add(k);
+function trechosPT(pt) {
+  const seq = [];
+  const pos = t => { if (seq[seq.length - 1] !== t) seq.push(t); };
+  String(pt).split("\n").forEach(linha => {
+    const l = linha.trim().replace(/^\*+/, "");
+    if (!/\p{L}/u.test(l)) return;
+    if (!/^—/.test(l)) return pos("N");
+    l.replace(/^—\s*/, "").split(/\s—\s/).forEach((parte, i) => {
+      if (/\p{L}/u.test(parte)) pos(i % 2 === 0 ? "F" : "N");
     });
-    return [...nums].sort((a, b) => a - b);
-  };
-
-  // Correção: a IA recebe o mesmo contexto de antes (skill, pedido e versão atual inteira),
-  // mas reescreve só os parágrafos apontados. Se o relatório não citar parágrafos,
-  // ou citar mais da metade, pede o trecho completo, como antes.
-  const revisar = async (atuais, titulo, relatorio, orientacao) => {
-    const base = item.pedido +
-      "\n\n=== SUA VERSÃO ATUAL ===\n" + versao(atuais) +
-      "\n\n=== " + titulo + " APONTOU ===\n" + relatorio +
-      "\n\n" + orientacao;
-    const nums = apontados(relatorio);
-
-    if (!nums.length || nums.length > n / 2) {
-      return pedir(base + " Devolva o trecho COMPLETO, de [1] a [" + n + "].");
-    }
-
-    log(titulo + ": reescrevendo só §" + nums.join(", §") + ".");
-    const quer = new Set(nums);
-    const r = await chamarIA(item.config, item.instrucoes, base + regras.lembreteFinal() +
-      "\n\n=== NESTA RESPOSTA ===\nDevolva SOMENTE os parágrafos " + nums.map(k => "[" + k + "]").join(", ") +
-      ", completos, no formato [número] texto. Não repita os demais.", sessao);
-
-    glossario.push(...lerGlossario(r.texto));
-    return trocar(atuais, lerResposta(r.texto, item.en).filter(b => quer.has(b.num)));
-  };
-
-  let blocos = await pedir(item.pedido);
-  let c = await conferir(blocos);
-  let rodadas = 0;
-
-  // 3B: alerta simples corrige uma vez; parágrafo faltando, até o limite do Config.
-  while (
-    (c.grave && rodadas < item.config.rodadas) ||
-    (c.alertas && rodadas === 0)
-  ) {
-    rodadas++;
-
-    const novos = await revisar(blocos, "CHECAGEM MECÂNICA (3B)", c.textoConferencia,
-      "Confira cada ponto com o original. Traduza o que faltou e insira no lugar certo; " +
-      "corrija perda, acréscimo ou erro; mantenha o que, conferido, estiver correto.");
-
-    const nova = await conferir(novos);
-    if (!melhorOuIgual(nova, c)) break;
-
-    blocos = novos;
-    c = nova;
-  }
-
-  // Parágrafo faltando: pede só os que faltaram (barato), até 3 vezes, e encaixa no lugar.
-  const faltando = lista => {
-    const tem = new Set(lista.map(b => b.num));
-    const f = [];
-    for (let k = 1; k <= n; k++) if (!tem.has(k)) f.push(k);
-    return f;
-  };
-
-  for (let tentativa = 1; tentativa <= 3 && faltando(blocos).length; tentativa++) {
-    const faltam = faltando(blocos);
-    log("Faltaram " + faltam.length + " parágrafo(s): §" + faltam.join(", §") + ". Pedindo só esses (tentativa " + tentativa + ").");
-
-    const pedido = "=== PARÁGRAFOS QUE FICARAM DE FORA ===\n" +
-      "Traduza SOMENTE os parágrafos abaixo, completos, seguindo todas as regras. " +
-      "Devolva cada um no formato [número] texto, com o mesmo número do original.\n\n" +
-      faltam.map(k => "[" + k + "] " + regras.textoEN(item.en, k)).join("\n\n");
-
-    const r = await chamarIA(item.config, item.instrucoes, pedido + regras.lembreteFinal(), sessao);
-    const quer = new Set(faltam);
-    const novos = lerResposta(r.texto, item.en).filter(b => quer.has(b.num));
-    if (!novos.length) continue;
-
-    blocos = blocos.concat(novos).sort((a, b) => a.num - b.num); // a ordem dentro do mesmo § se mantém
-    c = await conferir(blocos);
-  }
-
-  if (faltando(blocos).length) {
-    throw erro("FALTA", "Ainda faltam os parágrafos §" + faltando(blocos).join(", §") + " depois de 3 tentativas.");
-  }
-
-  // Aceita a versão nova se não piorar a 3B. Se piorar, aproveita parágrafo por parágrafo:
-  // fica a versão nova só onde a conferência continuou 🟩/⬜ (ou igual à de antes).
-  const aceitarSeMelhor = async (novos, nome) => {
-    const nova = await conferir(novos);
-    if (!nova.grave && nova.alertas <= c.alertas) {
-      log(nome + " aceito: estilo de " + c.alertasEstilo + " para " + nova.alertasEstilo + " pendência(s).");
-      blocos = novos;
-      c = nova;
-      return;
-    }
-
-    const antes = Array.from(c.barra || "");
-    const depois = Array.from(nova.barra || "");
-    const bons = new Set();
-    for (let k = 1; k <= n; k++) {
-      const d = depois[k - 1];
-      if (d === "🟩" || d === "⬜" || d === antes[k - 1]) bons.add(k);
-    }
-
-    const mistura = blocos.filter(b => !bons.has(b.num))
-      .concat(novos.filter(b => bons.has(b.num)))
-      .sort((x, y) => x.num - y.num);
-    const conf = await conferir(mistura);
-
-    if (bons.size && !conf.grave && conf.alertas <= c.alertas) {
-      log(nome + " aceito em parte: estilo de " + c.alertasEstilo + " para " + conf.alertasEstilo + " pendência(s).");
-      blocos = mistura;
-      c = conf;
-    } else {
-      log(nome + " descartado (piorava a conferência).");
-    }
-  };
-
-  // Refino editorial + 3C numa chamada só: segunda leitura com o inglês ao lado, já
-  // levando as pendências de estilo da 3C. Volta só o que mudou.
-  let refinado = false;
-  if (!c.grave) {
-    const pares = [];
-    for (let k = 1; k <= n; k++) {
-      pares.push("[" + k + "] EN: " + regras.textoEN(item.en, k) + "\n[" + k + "] PT: " +
-        blocos.filter(b => b.num === k).map(b => (b.nivel ? "#".repeat(b.nivel) + " " : "") + b.texto).join("\n"));
-    }
-
-    const estilo = c.alertasEstilo
-      ? "\n\nPENDÊNCIAS DE ESTILO (3C) — resolva também, nos parágrafos indicados:\n" + c.textoEstilo
-      : "";
-    const r = await chamarIA(item.config, item.instrucoes, regras.REFINO + estilo + "\n\n" + pares.join("\n\n"), sessao);
-    const corrigidos = regras.autocorrigir(lerResposta(r.texto.replace(/^\[\d+\]\s*EN:.*$/gm, "").replace(/^(\[\d+\])\s*PT:\s*/gm, "$1 "), item.en));
-
-    refinado = !r.cortado;
-    if (corrigidos.length && !r.cortado) {
-      log("Refino (com 3C): reescreveu §" + [...new Set(corrigidos.map(b => b.num))].join(", §") + ".");
-      await aceitarSeMelhor(trocar(blocos, corrigidos), "Refino");
-    } else {
-      log(r.cortado ? "Refino descartado (resposta cortada)." : "Refino: nada a mudar.");
-    }
-  }
-
-  // 3C separada só de reserva: quando o refino não rodou (resposta cortada)
-  // ou quando ainda sobraram muitas pendências de estilo (mais de 5).
-  if (!c.grave && c.alertasEstilo && (!refinado || c.alertasEstilo > 5)) {
-    const novos = await revisar(blocos, "CHECAGEM DE ESTILO (3C)", c.textoEstilo,
-      "Reescreva só o que for vício de estilo (seções 6A e 6B), sem perder nem acrescentar conteúdo.");
-    await aceitarSeMelhor(novos, "3C");
-  }
-
-  // Trava das regras SB: confere por código e manda corrigir só os parágrafos que quebraram alguma regra.
-  blocos = regras.autocorrigir(blocos);
-  let violacoes = regras.checarRegras(blocos, item.en);
-
-  for (let rodada = 1; violacoes.length && rodada <= 2; rodada++) {
-    const nums = new Set(violacoes.map(v => v.num));
-    const pedido = "=== CORREÇÃO DE REGRAS SB ===\n" +
-      "Reescreva SOMENTE os parágrafos abaixo, corrigindo a regra indicada em cada um, sem perder nem acrescentar conteúdo. " +
-      "Devolva cada um no formato [número] texto.\n\n" +
-      violacoes.map(v =>
-        "ORIGINAL [" + v.num + "] " + regras.textoEN(item.en, v.num) + "\n" +
-        "SUA VERSÃO:\n" + versao(blocos.filter(b => b.num === v.num)) + "\n" +
-        "CORRIJA: " + v.instrucoes.join(" ")
-      ).join("\n\n");
-
-    const r = await chamarIA(item.config, item.instrucoes, pedido, sessao);
-    const corrigidos = regras.autocorrigir(lerResposta(r.texto, item.en).filter(b => nums.has(b.num)));
-    const novos = trocar(blocos, corrigidos);
-
-    const nova = await conferir(novos);
-    const novasViolacoes = regras.checarRegras(novos, item.en);
-    if (nova.grave || nova.falta > c.falta || novasViolacoes.length > violacoes.length) break;
-
-    blocos = novos;
-    c = nova;
-    violacoes = novasViolacoes;
-  }
-
-  // TRAVA DE CONTEÚDO: fala ou frase perdida nunca é gravada.
-  // Se as correções não resolveram, traduz esses parágrafos de novo, do zero (até 2 vezes).
-  // Se ainda faltar, o trecho não é gravado: refaz o trecho inteiro e, depois, pausa o livro.
-  const criticas = lista => lista.filter(v => v.criticas && v.criticas.length);
-  for (let tentativa = 1; tentativa <= 2 && criticas(violacoes).length; tentativa++) {
-    const ruins = criticas(violacoes);
-    log("TRAVA DE CONTEÚDO: " + ruins.map(v => "§" + v.num + " (" + v.criticas.join(", ") + ")").join("; ") +
-      ". Traduzindo esses parágrafos de novo, do zero (tentativa " + tentativa + ").");
-
-    const pedido = "=== PARÁGRAFOS COM CONTEÚDO PERDIDO ===\n" +
-      "A tradução destes parágrafos perdeu fala, frase, gesto ou reação do original. " +
-      "Traduza cada um DE NOVO, do zero, frase por frase, com todo o conteúdo do inglês e seguindo todas as regras. " +
-      "Devolva cada um no formato [número] texto, com o mesmo número do original.\n\n" +
-      ruins.map(v => "[" + v.num + "] " + regras.textoEN(item.en, v.num) + "\nPROBLEMA: " +
-        v.instrucoes.join(" ")).join("\n\n");
-
-    const r = await chamarIA(item.config, item.instrucoes, pedido + regras.lembreteFinal(), sessao);
-    const quer = new Set(ruins.map(v => v.num));
-    const corrigidos = regras.autocorrigir(lerResposta(r.texto, item.en).filter(b => quer.has(b.num)));
-    if (!corrigidos.length) continue;
-
-    const novos = trocar(blocos, corrigidos);
-    const novasViolacoes = regras.checarRegras(novos, item.en);
-    if (criticas(novasViolacoes).length < ruins.length) {
-      blocos = novos;
-      violacoes = novasViolacoes;
-      c = await conferir(blocos);
-    }
-  }
-
-  if (criticas(violacoes).length) {
-    throw erro("FALTA", "Conteúdo perdido em " + criticas(violacoes).map(v => "§" + v.num + " (" + v.criticas.join(", ") + ")").join("; ") +
-      " depois de todas as correções. Nada foi gravado.");
-  }
-
-  // Títulos: o nível do original vale sempre; sem nível no original, vale o que a IA reconheceu.
-  blocos = regras.ajustarTitulos(blocos, item.en);
-
-  const pendentes = violacoes.map(v => "§" + v.num + " (" + v.regras.join(", ") + ")");
-  const regrasPendentes = violacoes.map(v => ({ num: v.num, regras: v.regras }));
-  return { blocos, rodadas, glossario, pendentes, regrasPendentes };
+  });
+  return seq.length;
 }
 
 
-/* ---------- Motor ---------- */
+/* Calcos do inglês já encontrados na revisão: [padrão, forma natural].
+ * Para acrescentar: copie uma linha e troque o padrão e a sugestão. */
+const CALCOS = [
+  ["bat\\p{L}* cinco|(?:para|receber|ganhar) um cinco", "high five → \"bater na mão\", \"toca aqui\""],
+  ["descans\\p{L}* sobre os louros", "rest on one's laurels → \"dormir sobre os louros\""],
+  ["mais vezes do que não", "more often than not → \"na maioria das vezes\""],
+  ["(?:não|nem) (?:é|foi|era) como se", "it's not like → \"não é que\", \"nem foi um jogo importante\""],
+  ["faz (?:\\p{L}+ )?(?:horas|dias|semanas|meses|anos|tempo) desde que", "it's been weeks since → \"faz semanas que não…\""],
+  ["(?:eu )?(?:já )?mencionei (?:que )?\\p{L}+\\?", "did I mention…? → \"Já falei que ele é…?\""],
+  ["fisicalidade", "physicality → \"o contato físico\", \"o corpo a corpo\""],
+  ["terapia de conversa", "talk therapy → \"terapia\""],
+  ["afeto parental", "parental affection → \"carinho de pai e mãe\""],
+  ["do norte do estado", "upstate New York → \"do interior de Nova York\""],
+  ["fazer (?:um )?nome para (?:nós|mim|si)(?: mesm\\p{L}+)?", "make a name for ourselves → \"fazer nome\""],
+  ["mão que (?:me|lhe|nos|te) foi dada", "the hand I've been dealt → \"as cartas que a vida me deu\""],
+  ["riso pelo nariz", "snort out a laugh → \"solta uma risada abafada\", \"bufa uma risada\""],
+  ["volta da vitória", "victory lap of high fives → \"rodada de comemoração\""],
+  ["(?:falo|fala|digo|diz|disse) sem expressão", "deadpan → \"digo, impassível\", \"sem mudar a cara\""],
+  ["passos? (?:visíveis )?para longe", "take steps away → \"se afastam\", \"recuam\""],
+  ["traseiro lento", "hurry his slow ass up → \"mexer essa bunda\", \"andar logo\""],
+  ["(?:olhar|olhos) (?:de \\p{L}+ )?sobre mim", "eyes on me → \"Penny olhando para mim\""],
+  ["ofensa cortante", "cutting insult → \"alfinetada\", \"insulto afiado\""],
+  ["c[êe]ntimos?", "nickel/dime/cents → \"centavos\" (\"cêntimo\" é de Portugal); apelido próprio fica como no original"],
+  ["reengast\\p{L}*", "reset (joia, pedra) → \"montar a pedra num engaste novo\", \"trocar o engaste\" (\"reengastar\" não existe)"],
+  ["retrein\\p{L}*|sobrepens\\p{L}*|sobreanalis\\p{L}*", "prefixo do inglês colado no verbo (re-, over-) → \"treinar de novo\", \"pensar demais\", \"analisar demais\""],
+  ["(?:umas|as|algumas|duas) milhares", "a few thousand times → \"milhares de vezes\" (milhar é masculino: \"uns milhares\")"],
+  ["revirt\\p{L}*", "revirar se conjuga como virar → \"reviro\", \"revira\", \"revirou\" (\"revirto\" não existe)"],
+  ["(?:respiração|fôlego) que (?:eu |ele |ela )?(?:nem )?(?:sabia|sabiam|percebi|percebeu)", "breath I didn't know I was holding → \"solto o ar que nem percebi que estava prendendo\""],
+  ["pul\\p{L}* uma batida", "skip a beat → \"disparar\" ou \"falhar\" (\"meu coração disparou\")"],
+  // Achados na análise de Untamed (MJ Hendrix)
+  ["cabeça de cabelo", "a head of hair → \"o cabelo\", \"os cabelos pretos\" (\"procuro alguém de cabelo preto\")"],
+  ["sorriso (?:\\p{L}+ )?se espalh\\p{L}*", "a smile spreads across her face → \"ela abre um sorriso\""],
+  ["se instal\\p{L}* (?:no|em) (?:meu|seu|nosso)? ?(?:estômago|peito)", "a feeling settles in my stomach → \"sinto um aperto no estômago\", \"o estômago embrulha\""],
+  ["não acho que (?:eu )?consig\\p{L}*", "I don't think I'll make it → \"acho que não consigo\", \"duvido que eu consiga\""],
+  ["(?:leva|levou|levar) \\p{L}+ (?:\\p{L}+ )?para outro (?:patamar|nível)", "take X to the next level → reestruture com sentido (\"o prefeito leva a sério demais esse posto de dono da cidade\")"],
+  ["de volta no", "be back at → \"de volta ao\", \"de volta à\""],
+  ["(?:os|meus|seus) músculos (?:tensos )?se relax\\p{L}*", "my muscles relax → \"relaxo\", \"meu corpo relaxa\""],
+  ["se dois de vocês", "if two of you → \"se vocês dois\""]
+];
+const RE_CALCOS = CALCOS.map(([p, s]) => [palavra(p), s]);
 
-const ESPERA_ERRO_MS = 10 * 60 * 1000;
-const restante = () => LIMITE_MS - (Date.now() - INICIO);
 
-/** Espera 10 minutos (ou o que faltar da execução) antes de tentar de novo. */
-async function esperarETentar(motivo) {
-  const ms = Math.min(ESPERA_ERRO_MS, Math.max(restante(), 0));
-  log(motivo + " Tentando de novo em " + Math.round(ms / 60000) + " min.");
-  await esperar(ms);
+/* Expressões do ORIGINAL que costumam virar calco: [padrão no inglês, orientação].
+ * O código procura no inglês ANTES de traduzir e manda a orientação só quando a
+ * expressão aparece no trecho (não aumenta o pedido dos trechos que não têm). */
+const EXPRESSOES_EN = [
+  [/^\s*(?:#+\s*)?(?:then|now)\s*(?:\.{3}|…|:)?\s*$/i, "\"Then…\" / \"Now…\" sozinhos na linha marcam o TEMPO da cena (passado/flashback x presente): Then → \"Antes…\" (ou \"Naquela época…\"); Now → \"Agora…\". Nunca \"Então…\". Use a mesma forma em todo o livro"],
+  [/\b[Ee]arth to \p{Lu}/u, "Earth to X → \"Terra chamando X\" ou \"Alô, X?\" (nunca \"Terra para X\")"],
+  [/\bhigh[- ]?fives?\b/i, "high five → \"bater na mão\", \"toca aqui\" (nunca \"bater cinco\" nem \"um cinco\")"],
+  [/\blaurels\b/i, "rest on one's laurels → \"dormir sobre os louros\""],
+  [/\bmore often than not\b/i, "more often than not → \"na maioria das vezes\""],
+  [/\bit['’]?s not like\b/i, "it's not like → negação direta (\"Não ganhamos…\", \"Não é que…\"), nunca \"Não é como se\""],
+  [/\b(?:it['’]?s|it has|it had) been (?:\w+ )?(?:seconds|minutes|hours|days|weeks|months|years|ages|forever|a while|so long|too long|long) since\b/i, "it's been X since → \"Faz X que (não)…\", nunca \"desde que\""],
+  [/\bdid i mention\b/i, "did I mention X? → \"Já falei que…?\""],
+  [/\bphysicality\b/i, "physicality → \"o contato físico\", \"o corpo a corpo\" (\"fisicalidade\" não existe)"],
+  [/\btalk therapy\b/i, "talk therapy → \"terapia\""],
+  [/\bparental (?:affection|love)\b/i, "parental affection → \"carinho de pai e mãe\""],
+  [/\bupstate\b/i, "upstate New York → \"interior de Nova York\""],
+  [/\bmake (?:a|their|our|his|her|my) name for\b/i, "make a name for oneself → \"fazer nome\""],
+  [/\bhand (?:i|he|she|we|they|you)(?:['’]ve| have| has| was| were)? (?:been )?dealt\b/i, "the hand I've been dealt → \"as cartas que a vida me deu\""],
+  [/\bsnort(?:s|ed|ing)?\b[^.?!]{0,15}\blaugh/i, "snort a laugh → \"solta uma risada abafada\", \"bufa uma risada\""],
+  [/\bdeadpan/i, "deadpan → \"impassível\", \"sem mudar a cara\""],
+  [/\bsteps? away\b/i, "take steps away → \"se afastar\", \"recuar\""],
+  [/\bass up\b/i, "hurry your ass up → \"mexer essa bunda\", \"andar logo\""],
+  [/\beyes on (?:me|him|her)\b/i, "eyes on me → \"olhando para mim\", nunca \"olhar sobre mim\""],
+  [/\bcutting (?:insult|remark|comment)/i, "cutting insult → \"alfinetada\", \"insulto afiado\""],
+  [/\bvictory lap\b/i, "victory lap → \"rodada de comemoração\""],
+  [/\baccident[- ]prone\b/i, "accident-prone → \"desastrado\""],
+  [/\berrant thought\b/i, "errant thought → reestruture (\"Só de pensar nisso…\")"],
+  [/\b(?:nickel|dime|cents?)\b/i, "moedas → \"centavos\" (nunca \"cêntimo\"); apelido com moeda fica como no original"],
+  [/\bfantas(?:y|ies)\b/i, "fantasy → \"fantasia\" (não é fantasma)"],
+  [/\bstrain\b/i, "strain no corpo de atleta → \"distensão\" (lesão), não \"esforço\""],
+  [/\bshot on\b/i, "made a shot on [goleiro] → \"marcou um gol em\""],
+  [/\bhighlight reel\b/i, "highlight reel → \"os melhores momentos\""],
+  [/\bthousands?\b/i, "thousand(s) → \"milhares\" é masculino (\"uns milhares\", nunca \"umas milhares\")"],
+  [/\bsick to (?:my|his|her|your) stomach\b/i, "sick to my stomach → \"o estômago embrulha\""],
+  [/\bheart sank\b|\bbutterflies\b/i, "heart sank / butterflies → \"aperto no peito\" / \"frio na barriga\""],
+  [/\b\w+ fucking \w+/i, "fucking no meio da frase → palavrão como interjeição entre vírgulas, no início ou no fim (\"Eu não ligo, porra.\")"],
+  [/(?:^|[“"\s])hell[,!]/i, "Hell, … → \"Inferno\" ou \"Porra\" (nunca \"Caramba\": não suavizar)"],
+  [/\bre-?set(?:s|ting)?\b/i, "reset: em joia/pedra → \"montar a pedra num engaste novo\", \"trocar o engaste\"; em aparelho → \"reiniciar\" (nunca \"reengastar\")"],
+  [/\bre-?(?:train|do|think|read|write|watch|start|open|build|make|set|mount|polish)(?:s|ed|ing)?\b|\bover(?:think|analy[sz]e|react|share)\w*/i, "verbo com re-/over- → verbo português + \"de novo\" ou \"demais\"; nunca invente palavra com prefixo (\"reengastar\", \"retreinar\", \"sobrepensar\")"],
+  [/\broll(?:s|ed|ing)? (?:my|his|her|their|your|our) eyes\b/i, "roll my eyes → \"reviro os olhos\" (revirar: reviro, revira, revirou; \"revirto\" não existe)"],
+  [/\b(?:hold|held|grab|get|got|open|pull)\w*\b[^.?!]{0,20}\b(?:her|his|my|your|their) (?:car |front |passenger )?(?:door|chair|seat)\b/i, "gesto de cortesia (hold/get her door, pull out her chair) → \"seguro a porta do carro para ela\", \"puxo a cadeira para ela\", nunca \"a porta dela\""],
+  [/\bbreath (?:i|he|she|we|they|you) (?:didn['’]?t|did not) (?:know|realize)/i, "breath I didn't know I was holding → \"solto o ar que nem percebi que estava prendendo\" (nunca \"uma respiração\")"],
+  [/\bskip(?:s|ped|ping)? a beat\b/i, "skip a beat → \"disparar\" ou \"falhar\""],
+  [/\b(?:smile|grin) (?:tugs?|pulls?|tugged|pulled)\b/i, "a smile tugs at my lips → \"abro um meio sorriso\", \"um sorriso me escapa\""],
+  [/\bfuck\.? my\.? life\b/i, "Fuck. My. Life. → \"Que. Merda. De. Vida.\" (mantém o palavrão e as pausas)"],
+  [/\bhead of (?:\w+ )?hair\b/i, "a head of (dark) hair → \"o cabelo (escuro)\", nunca \"cabeça de cabelo\""],
+  [/\b(?:smile|grin) spreads?\b/i, "a smile spreads across her face → \"ela abre um sorriso\", nunca \"o sorriso se espalha\""],
+  [/\bto (?:a whole )?(?:new|the next|another) level\b/i, "take X to the next level → reestruture com o sentido real, nunca \"para outro patamar\""],
+  [/\bi don['’]?t think i(?:['’]ll| will| can)\b/i, "I don't think I'll… → \"acho que não vou…\", \"duvido que…\" (nunca \"Não acho que\")"]
+];
+
+
+/* Camada Fantasia: vai junto das instruções quando a coluna "Estilo" da fila diz "fantasia".
+ * Base: seção 11 da skill tradutor-en-pt-br. */
+const CAMADA_FANTASIA = `
+
+=== CAMADA FANTASIA E PARANORMAL (este livro é de fantasia: aplique em todo o trecho) ===
+1. Termos sem tradução literal (raças, clãs, ordens, criaturas, feitiços, títulos, poderes, objetos mágicos): adapte de forma criativa e fluida, preservando sentido e tom, para que façam sentido à leitora brasileira e mantenham a imersão. Nome próprio de clã, raça, grupo, reino ou título criado pela autora mantém a identidade (não traduza nome próprio inventado).
+2. "sift", "glamoured", "apparate" e verbos mágicos parecidos: use o termo que dá o melhor sentido na frase, mantendo o tom fantástico. Exemplos: sift → "deslizar", "filtrar-se"; glamoured → "encantado", "disfarçado por magia"; apparate → "teletransportar-se", "materializar-se".
+3. Consistência é crítica: confira o glossário da obra antes de traduzir qualquer termo do universo. Se o termo já está lá, use exatamente a mesma solução. Se é novo, decida uma vez e registre em [G] (SEÇÃO | termo em inglês | tradução escolhida | nº do parágrafo | observação). Nunca alterne entre duas traduções do mesmo termo.
+4. Registro: fantasia pede vocabulário um pouco mais elevado e imagético na narração (sem ficar empolado), e falas de nobres, criaturas antigas ou seres mágicos podem soar mais formais se o original soa assim. Personagem jovem ou moderno continua falando natural.
+5. Títulos e tratamentos de corte: Lord/Lady → "lorde"/"lady"; Your Majesty → "Vossa Majestade"; Your Highness → "Vossa Alteza"; High Lord, High King e títulos inventados → adapte e mantenha fixo no glossário.
+6. Criaturas com nome consagrado em português usam a forma consagrada: fae → "feérico(a)" ou "fae" (escolha uma e fixe), shifter → "metamorfo", werewolf → "lobisomem", witch → "bruxa", warlock → "bruxo", mate → "parceiro(a)" ou "companheiro(a)" (fixe), bond → "vínculo", wards → "proteções", glamour → "ilusão" ou "encanto".
+7. Se um termo for realmente ambíguo e a escolha mudar a obra, registre em [G] com a observação, sem interromper o texto.
+`;
+
+/** Instruções completas para o estilo do livro (romance é o padrão; "fantasia" soma a camada). */
+function instrucoesDoEstilo(instrucoes, estilo) {
+  return /fantas|paranormal/i.test(String(estilo || "")) ? instrucoes + CAMADA_FANTASIA : instrucoes;
 }
 
-/** Avisa o GitHub para começar a próxima execução logo depois desta. */
-function pedirContinuacao() {
-  if (process.env.GITHUB_OUTPUT) require("fs").appendFileSync(process.env.GITHUB_OUTPUT, "continuar=true\n");
+
+/* Refino editorial: segunda leitura de toda tradução, com o inglês ao lado.
+ * Lista curta e certeira: são os erros que mais aparecem nas revisões da SB. */
+const REFINO = `=== REFINO EDITORIAL ===
+Você é a revisora final de uma editora brasileira exigente. Abaixo estão o original e a tradução de cada parágrafo. Releia cada par e corrija o que soar traduzido. Confira, parágrafo por parágrafo:
+1. Sentido: nada mudou, faltou ou sobrou em relação ao inglês.
+2. Tempo verbal: o mesmo do original. Ação em curso no presente contínuo ("She's paying") → "está pagando". Diálogo que retoma o verbo da fala anterior precisa casar com ela.
+3. Calco: frase que segue a ordem e as palavras do inglês. Reescreva como uma autora brasileira escreveria ("a head of dark hair" → "o cabelo escuro"; "a smile spreads across his face" → "ele abre um sorriso"; "I don't think I'll make it" → "acho que não vou conseguir").
+4. Expressões idiomáticas: equivalente natural em português, nunca a tradução palavra por palavra.
+5. Possessivos e pronomes sobrando: corte "dele", "dela", "seu", "sua", "meu", "minha" e pronome sujeito quando o contexto já deixa claro ("Ele passa a mão no cabelo", não "Ele passa a mão dele no cabelo dele").
+6. Palavrão, xingamento e cena explícita com o mesmo peso do original: nada suavizado nem cortado ("dodged that fucking bullet" → "escapou dessa, porra").
+7. Ortografia e concordância (gênero de quem narra e de com quem se fala; "fodido", nunca "fudido").
+8. Fala: a fala de um mesmo personagem num parágrafo nunca se divide em dois travessões seguidos; depois da narração, ela continua no mesmo bloco ("— Obrigado — murmuro. — Amo você.").
+9. Fluidez: a frase lida em voz alta soa natural, sem repetição de palavra próxima (ex.: "cadeia" para prisão e "cadeia alimentar" na mesma frase).
+Mantenha o que já está bom: só reescreva o parágrafo que tiver problema, sem acrescentar conteúdo nem mudar o estilo da autora.
+Devolva SOMENTE os parágrafos que mudou, completos, no formato [número] texto. Mesma formatação (travessão, itálico com *, títulos com #). Se nenhum precisar de mudança, responda apenas: NENHUM.`;
+
+/** Orientações das expressões que aparecem neste trecho do original, com o número do parágrafo. */
+function dicasDoTrecho(en) {
+  const achadas = new Map();
+  (en || []).forEach((_, i) => {
+    const t = textoEN(en, i + 1);
+    EXPRESSOES_EN.forEach(([re, dica]) => {
+      if (re.test(t)) achadas.set(dica, (achadas.get(dica) || []).concat(i + 1));
+    });
+  });
+  if (!achadas.size) return "";
+  return "\n\n=== EXPRESSÕES DESTE TRECHO QUE COSTUMAM VIRAR CALCO ===\n" +
+    [...achadas].map(([dica, nums]) => "- [" + nums.join("], [") + "] " + dica).join("\n");
 }
 
 
-async function main() {
-  if (!PONTE_URL || !PONTE_TOKEN) throw new Error("Faltam os Secrets PONTE_URL ou PONTE_TOKEN.");
-  if (!CHAVE) {
-    log("Sem chave: falta o Secret " + (ADM ? nomeDaChave(ADM) : "OPENROUTER_API_KEY") + ". Nada foi traduzido.");
-    return;
-  }
+/* Regras checadas em cada parágrafo traduzido. */
+const REGRAS = [
+  { nome: "calco do inglês", soCorrecao: true, // não vai no lembrete de todo pedido (custo)
+    teste: pt => RE_CALCOS.some(([re]) => re.test(pt)),
+    instrucao: pt => "Sem calco de expressão inglesa: escreva como um autor brasileiro escreveria. " +
+      RE_CALCOS.filter(([re]) => re.test(pt)).map(([, s]) => s).join("; ") + "." },
 
-  let trechos = 0;
-  let motivoFim = "";
-  const refeitos = {};
-  const vistos = {};
+  { nome: "registro coloquial", padrao: palavra("tô|tá|tava|tavam|tamo|né|vc|pra|pras|pro|pros|cê"),
+    instrucao: "Nunca \"tô\", \"tá\", \"tava\", \"né\", \"pra\", \"pro\", \"vc\", nem em fala: use a forma completa (\"estou\", \"está\", \"para\"). \"tá bom\" → \"está bem\" ou \"certo\"." },
 
-  while (restante() > 0) {
-    let item;
+  { nome: "palavra fora do padrão editorial", padrao: palavra("trep\\p{L}*|paparic\\p{L}*|boyzinho\\p{L}*|vendeta\\p{L}*|chiliques?|danad[oa]s?|xoxota\\p{L}*|cu"),
+    instrucao: "\"trepar\" → \"transar\"; \"paparico\" → \"mimo\"; \"boyzinho\" → \"rapaz\"; \"vendeta\" → \"vingança\"; \"chilique\" → \"escândalo\"; nunca \"danada\" (use \"porra\", \"caralho\"); nunca \"cu\" nem \"xoxota\" (ass → \"bunda\"; pussy → \"boceta\")." },
 
-    try {
-      item = await ponte("proximo");
-    } catch (e) {
-      await esperarETentar("ERRO ao buscar o próximo trecho: " + e.message + ".");
-      continue;
+  { nome: "pronome \"te\" com locução", padrao: palavra("(estou|está|estava|estamos|vou|vai|vamos|posso|pode|podia|quero|queria|preciso|precisa)\\s+te\\s+\\p{L}+"),
+    instrucao: "\"Estou te vendo\", \"posso te ajudar\" → \"Estou vendo você\", \"Posso ajudar você\"." },
+
+  { nome: "termo em inglês", padrao: palavra("Doc|UK|US|USA", "u"),
+    instrucao: "\"Doc\" → \"Doutor\" se o personagem é homem, \"Doutora\" se é mulher (confira no glossário e no contexto; o mesmo personagem nunca alterna); \"UK\" → \"Reino Unido\"; \"US\"/\"USA\" → \"Estados Unidos\"." },
+
+  { nome: "travessão na narração", teste: pt => pt.split("\n").some(l => !/^\*{0,3}—/.test(l.trim()) && /\s—\s/.test(l)), // linha a linha: narração e fala podem vir em blocos separados
+    instrucao: "Travessão só em diálogo. Na narração, troque por vírgula, ponto e vírgula, dois-pontos, reticências ou parênteses." },
+
+  // Imagem no meio do texto do original (emoji, ícone): o Apps Script manda como [IMG1], [IMG2]…
+  { nome: "imagem perdida", teste: (pt, en) => {
+      const marcas = t => (String(t).match(/\[IMG\d+\]/g) || []).sort().join(" ");
+      return marcas(en) !== marcas(pt);
+    },
+    instrucao: "Marcadores [IMG1], [IMG2]… são imagens do livro (emoji, ícone): copie cada um exatamente igual, no mesmo lugar da frase, sem traduzir, mover ou remover." },
+
+  // Original alterna fala e narração mais vezes que a tradução: narração ficou colada na fala
+  // ("— Obrigada, Gunner. Ela saiu correndo…") ou fala colada na narração ("Ele rosnou. — Case comigo.").
+  { nome: "narração colada na fala", soCorrecao: true,
+    teste: (pt, en) => temFala(en) && /—/.test(pt) && trechosPT(pt) < trechosEN(en),
+    instrucao: "Toda troca entre fala e narração leva travessão: \"— Obrigada, Gunner. — Ela saiu correndo do banheiro.\" / \"— Fiquei furiosa — a voz dela falhou. — Quando voltou…\". Narração antes de uma fala fica numa linha e a fala começa outra linha com travessão." },
+
+  // TRAVAS DE CONTEÚDO (critica: true). Se continuarem quebradas depois das correções,
+  // o parágrafo é traduzido de novo do zero; se ainda assim falhar, o trecho não é gravado.
+
+  // Fala do original que sumiu na tradução ("James, I don't… I don't love you." cortada).
+  // Só acusa quando a tradução também ficou menor que o inglês (juntar duas falas num
+  // travessão só, sem perder nada, não conta).
+  { nome: "fala perdida", soCorrecao: true, critica: true,
+    teste: (pt, en) => falasEN(en) > falasPT(pt) && contarPalavras(pt) < contarPalavras(en),
+    instrucao: "Uma fala do original sumiu da tradução. Traduza o parágrafo inteiro de novo, frase por frase, com TODAS as falas do inglês, cada uma com travessão, no mesmo lugar em que aparecem." },
+
+  // Parágrafo bem mais curto que o original: frase, gesto ou reação cortados
+  // ("Her eyes snapped up from the plate." sumiu antes da fala).
+  { nome: "trecho cortado", soCorrecao: true, critica: true,
+    teste: (pt, en) => contarPalavras(en) >= 10 && contarPalavras(pt) < 0.65 * contarPalavras(en),
+    instrucao: "A tradução ficou bem menor que o original: falta frase, gesto, reação ou detalhe. Confira frase por frase com o inglês e traduza o que faltou, no lugar certo, sem resumir." },
+
+  // Fala de verdade no original: parágrafo que abre com aspas, ou aspas fechando depois de , ? ! …
+  // (aspas de ênfase, título ou placa não contam).
+  { nome: "fala sem travessão", teste: (pt, en) => temFala(en) && !/—/.test(pt),
+    instrucao: "O original tem fala entre aspas: em português, fala vai com travessão no início da linha, nunca aspas nem discurso indireto (\"— Oi — ela diz.\"). Se o mesmo parágrafo tiver narração e fala, separe em blocos com o mesmo número: [7] Ela desligou. / [7] — Droga. " +
+      "Mas a fala de UM personagem nunca se divide em dois travessões seguidos (parece que outra pessoa respondeu): continue no mesmo bloco depois da narração (\"— Wilder? — ela pergunta, sonolenta. — Você está bem?\")." }
+];
+
+
+/** Texto completo de cada parágrafo traduzido (junta as linhas do mesmo número). */
+function agruparPorNumero(blocos) {
+  const mapa = new Map();
+  blocos.forEach(b => mapa.set(b.num, (mapa.has(b.num) ? mapa.get(b.num) + "\n" : "") + b.texto));
+  return mapa;
+}
+
+function textoEN(en, num) {
+  const p = en[num - 1];
+  return typeof p === "string" ? p : (p && (p.texto || p.text)) || "";
+}
+
+
+/**
+ * Fala do mesmo personagem quebrada em dois travessões seguidos, no mesmo §:
+ * "— Wilder? — A voz dela vem do lado." + "— Você está bem?" vira um bloco só.
+ * Se o bloco anterior termina na narração (nº ímpar de " — " internos), continua com " — ";
+ * se termina dentro da fala, só tira o travessão do seguinte.
+ */
+function juntarFalaDividida(blocos) {
+  const fala = t => /^\*{0,3}— /.test(t);
+  return blocos.reduce((saida, b) => {
+    const ant = saida[saida.length - 1];
+    if (ant && ant.num === b.num && !ant.nivel && !b.nivel && fala(ant.texto) && fala(b.texto)) {
+      const terminaNaNarracao = (ant.texto.match(/\s—\s/g) || []).length % 2 === 1;
+      ant.texto += " " + (terminaNaNarracao ? b.texto : b.texto.replace(/^(\*{0,3})— /, "$1"));
+      return saida;
     }
+    saida.push({ ...b });
+    return saida;
+  }, []);
+}
 
-    if (item.vazio) {
-      motivoFim = "Fila vazia: nenhum livro NA FILA ou EM ANDAMENTO. Confiro de novo na próxima hora.";
-      break;
-    }
 
-    if (item.concluido) {
-      log("LIVRO CONCLUÍDO: " + item.concluido);
-      totalDoLivro(item);
-      continue;
-    }
-
-    if (item.pausado) {
-      log("LIVRO PAUSADO: " + item.pausado);
-      continue;
-    }
-
-    // Trava: a skill e o Doc de exemplos precisam chegar à IA. Se não chegarem, pausa o livro.
-    const problema = regras.conferirInstrucoes(item.instrucoes, item.pedido);
-    if (problema) {
-      log("LIVRO PAUSADO: " + problema);
-      await ponte("pausar", { originalId: item.originalId, mensagem: problema }).catch(() => {});
-      continue;
-    }
-
-    // Regras do estilo do livro (coluna "Estilo" da fila).
-    item.instrucoes = regras.instrucoesDoEstilo(item.instrucoes, item.estilo);
-
-    // Trava contra gasto à toa: trecho vazio, ou o mesmo trecho voltando sem avançar, não vai para a IA.
-    const chavePos = item.originalId + ":" + JSON.stringify(item.pos);
-    vistos[chavePos] = (vistos[chavePos] || 0) + 1;
-
-    if (!Array.isArray(item.en) || !item.en.length || vistos[chavePos] > 3) {
-      const msg = !Array.isArray(item.en) || !item.en.length
-        ? "trecho sem parágrafos em " + item.rotulo + ". Nada foi enviado à IA."
-        : "o mesmo trecho voltou " + vistos[chavePos] + " vezes sem avançar (" + item.rotulo + ").";
-      log("LIVRO PAUSADO: " + msg);
-      await ponte("pausar", { originalId: item.originalId, mensagem: msg }).catch(() => {});
-      continue;
-    }
-
-    const custoAntes = gastoUS;
-    const entradaAntes = tokensEntrada;
-    const cacheAntes = tokensCache;
-    chamadasDoTrecho = [];
-    porProvedor = {};
-    const saidaAntes = tokensSaida;
-    log("Traduzindo: " + item.rotulo);
-
-    try {
-      const r = await traduzirTrecho(item);
-      const { pendentes, ...dados } = r;
-      const g = await ponte("gravar", { originalId: item.originalId, pos: item.pos, paragrafos: item.en.length, ...dados });
-
-      (g.linhas || []).forEach(l => log(l));
-      if (g.pausado) log("LIVRO PAUSADO: " + g.pausado);
-      if (g.ignorado) log(g.ignorado);
-      log("Regras SB: " + (pendentes.length ? pendentes.length + " pendente(s): " + pendentes.join("; ") : "todas cumpridas") + ".");
-      if (r.glossario.length) log("Glossário: " + r.glossario.length + " sugestão(ões) enviada(s).");
-
-      const entrada = tokensEntrada - entradaAntes;
-      if (entrada) {
-        log("Leitura da skill e do pedido: " + entrada + " tokens, " +
-          Math.round(100 * (tokensCache - cacheAntes) / entrada) + "% com desconto de cache " +
-          "(por chamada: " + chamadasDoTrecho.join(" · ") + ").");
-      }
-
-      log("Resposta da IA: " + (tokensSaida - saidaAntes) + " tokens.");
-
-      const livro = somarCusto(item, gastoUS - custoAntes);
-      log("Custo do trecho: US$ " + (gastoUS - custoAntes).toFixed(4) +
-        " · total desta execução: US$ " + gastoUS.toFixed(4) +
-        " · total do livro até agora: US$ " + livro.usd.toFixed(4));
-
-      trechos++;
-      escolherProvedor(item.config.modelo);
-
-    } catch (e) {
-      // Créditos ou chave: não adianta insistir (as outras adms seguem nas execuções delas).
-      if (e.tipo === "COTA") {
-        motivoFim = "PARADO: " + e.message + " Recarregue; a próxima execução continua de onde parou.";
-        break;
-      }
-
-      // Parágrafo faltando mesmo depois das tentativas: refaz o trecho inteiro mais uma vez antes de pausar.
-      if (e.tipo === "FALTA") {
-        const chave = item.originalId + ":" + JSON.stringify(item.pos);
-        refeitos[chave] = (refeitos[chave] || 0) + 1;
-
-        if (refeitos[chave] <= 1) {
-          log(e.message + " Refazendo o trecho inteiro. Nada foi gravado.");
-          continue;
-        }
-
-        log("LIVRO PAUSADO: " + e.message);
-        await ponte("pausar", { originalId: item.originalId, mensagem: e.message }).catch(() => {});
-        continue;
-      }
-
-      // Gravação sem confirmação: pausa o livro em vez de traduzir e gravar de novo.
-      if (e.tipo === "INCERTO") {
-        const msg = "Gravação incerta em " + item.rotulo + ": " + e.message + " Confira o fim do Doc antes de retomar.";
-        log("LIVRO PAUSADO: " + msg);
-        await ponte("pausar", { originalId: item.originalId, mensagem: msg }).catch(() => {});
-        continue;
-      }
-
-      // Problema no conteúdo do trecho: repetir daria o mesmo resultado.
-      if (e.tipo === "LONGO" || e.tipo === "BLOQUEIO") {
-        log("LIVRO PAUSADO: " + e.message);
-        await ponte("pausar", { originalId: item.originalId, mensagem: e.message }).catch(() => {});
-        continue;
-      }
-
-      // Qualquer outra falha (IA fora do ar, Google, rede): espera e repete o mesmo trecho.
-      await esperarETentar("ERRO: " + e.message + ". Nada foi gravado.");
-    }
-  }
-
-  if (!motivoFim) {
-    motivoFim = "Tempo da execução esgotado. A próxima começa em seguida.";
-    pedirContinuacao();
-  }
-
-  log(motivoFim);
-  log("Fim desta execução: " + trechos + " trecho(s), US$ " + gastoUS.toFixed(4) + ".");
-  livrosDaExecucao.forEach(k => {
-    const c = custos[k];
-    log((c.concluido ? "Total do livro (concluído) " : "Total do livro até agora ") + c.nome + ": US$ " +
-      c.usd.toFixed(4) + " em " + c.trechos + " trecho(s).");
+/**
+ * Linha repetida no mesmo §: "Antes que Gunner pudesse responder, o celular vibrou no bolso."
+ * seguida de "O celular vibrou no bolso." A linha que só repete o que o bloco anterior
+ * do mesmo § já disse é removida.
+ */
+function semLinhaRepetida(blocos) {
+  const norm = t => String(t).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\d ]+/gu, " ").replace(/\s+/g, " ").trim();
+  return blocos.filter((b, i) => {
+    const ant = blocos[i - 1];
+    if (!ant || ant.num !== b.num || ant.nivel || b.nivel) return true;
+    const n = norm(b.texto);
+    return !(n.split(" ").length >= 3 && norm(ant.texto).includes(n));
   });
 }
 
 
-main().catch(e => {
-  log("ERRO FATAL: " + e.message);
-  process.exit(1);
-});
+/** Aplica as autocorreções. Devolve os blocos corrigidos. */
+function autocorrigir(blocos) {
+  return juntarFalaDividida(semLinhaRepetida(blocos)).map(b => {
+    let t = b.texto;
+    AUTOCORRECOES.forEach(([de, para]) => { t = t.replace(de, para); });
+    return { ...b, texto: t };
+  });
+}
+
+
+/* ---------- Títulos (Título 1 a 4 do Google Docs) ---------- */
+
+const MAX_PALAVRAS_TITULO = 12; // parágrafo maior que isso no original nunca vira título
+
+/** Nível de título do parágrafo no original (1 a 4), ou 0 se for texto comum. */
+function nivelOriginal(en, num) {
+  const p = en[num - 1];
+
+  // Original marcado no próprio texto: "# Chapter 1", "## Jace".
+  if (typeof p === "string") {
+    const m = p.trim().match(/^(#{1,4})\s/);
+    return m ? m[1].length : 0;
+  }
+  if (!p || typeof p !== "object") return 0;
+
+  const v = p.nivel ?? p.heading ?? p.estilo ?? p.titulo ?? "";
+  if (typeof v === "number") return v >= 1 && v <= 4 ? v : 0;
+
+  const s = String(v).toUpperCase().replace(/[\s_]/g, "");
+  if (s === "TITLE") return 1;
+  if (s === "SUBTITLE") return 2;
+  const m = s.match(/(?:HEADING|TITULO|TÍTULO)([1-6])/);
+  return m ? Math.min(Number(m[1]), 4) : 0;
+}
+
+/**
+ * Define o nível final de cada bloco:
+ * - se o original tem título, usa o nível do original (a IA não muda);
+ * - se não tem, aceita o "#" da IA só em parágrafo curto (título de verdade).
+ */
+function ajustarTitulos(blocos, en) {
+  return blocos.map(b => {
+    // Rede de segurança: nenhum "#" de markdown chega ao Doc como texto.
+    if (/^[*_\s]*#{1,6}/.test(b.texto)) {
+      const nivelIA = b.texto.replace(/^[*_\s]*/, "").match(/^#+/)[0].length;
+      b = { ...b, nivel: b.nivel || Math.min(nivelIA, 4),
+        texto: b.texto.replace(/^[*_\s]*#{1,6}\s*/, "").replace(/^[*_]+|[*_]+$/g, "").trim() };
+    }
+
+    const original = nivelOriginal(en, b.num);
+    if (original) return { ...b, nivel: original };
+
+    const curto = textoEN(en, b.num).trim().split(/\s+/).length <= MAX_PALAVRAS_TITULO;
+    return { ...b, nivel: curto ? (b.nivel || 0) : 0 };
+  });
+}
+
+
+/** Lista de violações: [{ num, regras: [nome...], instrucoes: [...] }] */
+function checarRegras(blocos, en) {
+  const violacoes = [];
+
+  agruparPorNumero(blocos).forEach((pt, num) => {
+    const enTexto = textoEN(en, num);
+    const quebradas = REGRAS.filter(r => r.teste ? r.teste(pt, enTexto) : r.padrao.test(pt));
+    if (quebradas.length) {
+      violacoes.push({ num, regras: quebradas.map(r => r.nome),
+        criticas: quebradas.filter(r => r.critica).map(r => r.nome),
+        instrucoes: quebradas.map(r => typeof r.instrucao === "function" ? r.instrucao(pt) : r.instrucao) });
+    }
+  });
+
+  return violacoes;
+}
+
+
+/** Lembrete curto que vai no FIM de todo pedido (a IA dá mais peso ao que lê por último). */
+function lembreteFinal() {
+  return "\n\n=== ANTES DE RESPONDER, CONFIRA (regras SB, sem exceção) ===\n" +
+    "- Siga a skill inteira e o Doc de exemplos SB do começo ao fim do trecho, não só no início.\n" +
+    "- Traduza TODOS os parágrafos, na ordem, sem resumir, cortar ou juntar.\n" +
+    REGRAS.filter(r => !r.soCorrecao).map(r => "- " + r.instrucao).join("\n") + "\n" +
+    "- Fala hesitante usa reticências, nunca travessão colado na palavra (\"Eu… e… não sei.\").\n" +
+    "- Mesmo tempo verbal do original; palavrões e cenas explícitas com o mesmo peso, sem suavizar.\n" +
+    "- TÍTULOS: comece a linha de todo título com # e um espaço, mesmo que o original não esteja formatado como título:\n" +
+    "  # = parte, capítulo, prólogo, epílogo (\"[1] # Capítulo 1\");\n" +
+    "  ## = título logo abaixo dele: nome do capítulo ou de quem narra (\"[2] ## Jace\");\n" +
+    "  ### = subtítulo: lugar, data, tempo (\"[3] ### Dois anos antes\");\n" +
+    "  #### = divisão menor dentro do capítulo.\n" +
+    "  Texto comum, fala e epígrafe nunca levam #.";
+}
+
+
+/** Confere se a skill e o Doc de exemplos chegaram. Devolve o problema, ou "" se estiver tudo certo. */
+function conferirInstrucoes(instrucoes, pedido) {
+  const tudo = String(instrucoes || "") + "\n" + String(pedido || "");
+
+  if (String(instrucoes || "").length < TAMANHO_MINIMO_SKILL) {
+    return "A skill chegou incompleta à IA (" + String(instrucoes || "").length + " caracteres). Confira o Doc de regras no Config.";
+  }
+
+  const faltando = MARCAS_OBRIGATORIAS.filter(m => !tudo.toUpperCase().includes(m.marca.toUpperCase()));
+  if (faltando.length) {
+    return "Não chegou à IA: " + faltando.map(m => m.nome).join(", ") + ". Confira o ID_EXEMPLOS no Config.gs.";
+  }
+
+  return "";
+}
+
+
+module.exports = { REFINO, instrucoesDoEstilo, dicasDoTrecho, autocorrigir, checarRegras, lembreteFinal, conferirInstrucoes, textoEN, ajustarTitulos };
