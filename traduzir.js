@@ -397,7 +397,9 @@ function lerResposta(texto, en) {
     }
   });
 
-  return en ? semDuplicados(blocos, en) : blocos;
+  // Autocorreções já na leitura: a conferência 3B não gasta chamada com o que o código corrige sozinho
+  // (travessão dentro do itálico, linha repetida, fala do mesmo personagem dividida).
+  return en ? regras.autocorrigir(semDuplicados(blocos, en)) : blocos;
 }
 
 
