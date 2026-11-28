@@ -672,6 +672,41 @@ async function traduzirTrecho(item) {
     violacoes = novasViolacoes;
   }
 
+  // TRAVA DE CONTEÚDO: fala ou frase perdida nunca é gravada.
+  // Se as correções não resolveram, traduz esses parágrafos de novo, do zero (até 2 vezes).
+  // Se ainda faltar, o trecho não é gravado: refaz o trecho inteiro e, depois, pausa o livro.
+  const criticas = lista => lista.filter(v => v.criticas && v.criticas.length);
+  for (let tentativa = 1; tentativa <= 2 && criticas(violacoes).length; tentativa++) {
+    const ruins = criticas(violacoes);
+    log("TRAVA DE CONTEÚDO: " + ruins.map(v => "§" + v.num + " (" + v.criticas.join(", ") + ")").join("; ") +
+      ". Traduzindo esses parágrafos de novo, do zero (tentativa " + tentativa + ").");
+
+    const pedido = "=== PARÁGRAFOS COM CONTEÚDO PERDIDO ===\n" +
+      "A tradução destes parágrafos perdeu fala, frase, gesto ou reação do original. " +
+      "Traduza cada um DE NOVO, do zero, frase por frase, com todo o conteúdo do inglês e seguindo todas as regras. " +
+      "Devolva cada um no formato [número] texto, com o mesmo número do original.\n\n" +
+      ruins.map(v => "[" + v.num + "] " + regras.textoEN(item.en, v.num) + "\nPROBLEMA: " +
+        v.instrucoes.join(" ")).join("\n\n");
+
+    const r = await chamarIA(item.config, item.instrucoes, pedido + regras.lembreteFinal(), sessao);
+    const quer = new Set(ruins.map(v => v.num));
+    const corrigidos = regras.autocorrigir(lerResposta(r.texto, item.en).filter(b => quer.has(b.num)));
+    if (!corrigidos.length) continue;
+
+    const novos = trocar(blocos, corrigidos);
+    const novasViolacoes = regras.checarRegras(novos, item.en);
+    if (criticas(novasViolacoes).length < ruins.length) {
+      blocos = novos;
+      violacoes = novasViolacoes;
+      c = await conferir(blocos);
+    }
+  }
+
+  if (criticas(violacoes).length) {
+    throw erro("FALTA", "Conteúdo perdido em " + criticas(violacoes).map(v => "§" + v.num + " (" + v.criticas.join(", ") + ")").join("; ") +
+      " depois de todas as correções. Nada foi gravado.");
+  }
+
   // Títulos: o nível do original vale sempre; sem nível no original, vale o que a IA reconheceu.
   blocos = regras.ajustarTitulos(blocos, item.en);
 
