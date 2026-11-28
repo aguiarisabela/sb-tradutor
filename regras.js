@@ -269,7 +269,7 @@ const REGRAS = [
 
   // Original alterna fala e narração mais vezes que a tradução: narração ficou colada na fala
   // ("— Obrigada, Gunner. Ela saiu correndo…") ou fala colada na narração ("Ele rosnou. — Case comigo.").
-  { nome: "narração colada na fala", soCorrecao: true,
+  { nome: "narração colada na fala", dialogo: true, soCorrecao: true,
     teste: (pt, en) => temFala(en) && /—/.test(pt) && trechosPT(pt) < trechosEN(en),
     instrucao: "Toda troca entre fala e narração leva travessão: \"— Obrigada, Gunner. — Ela saiu correndo do banheiro.\" / \"— Fiquei furiosa — a voz dela falhou. — Quando voltou…\". Narração antes de uma fala fica numa linha e a fala começa outra linha com travessão." },
 
@@ -295,7 +295,7 @@ const REGRAS = [
   // Fala do original que sumiu na tradução ("James, I don't… I don't love you." cortada).
   // Só acusa quando a tradução também ficou menor que o inglês (juntar duas falas num
   // travessão só, sem perder nada, não conta).
-  { nome: "fala perdida", soCorrecao: true, critica: true,
+  { nome: "fala perdida", dialogo: true, soCorrecao: true, critica: true,
     teste: (pt, en) => falasEN(en) > falasPT(pt) && contarPalavras(pt) < contarPalavras(en),
     instrucao: "Uma fala do original sumiu da tradução. Traduza o parágrafo inteiro de novo, frase por frase, com TODAS as falas do inglês, cada uma com travessão, no mesmo lugar em que aparecem." },
 
@@ -307,7 +307,7 @@ const REGRAS = [
 
   // Fala de verdade no original: parágrafo que abre com aspas, ou aspas fechando depois de , ? ! …
   // (aspas de ênfase, título ou placa não contam).
-  { nome: "fala sem travessão", teste: (pt, en) => temFala(en) && !/—/.test(pt),
+  { nome: "fala sem travessão", dialogo: true, teste: (pt, en) => temFala(en) && !/—/.test(pt),
     instrucao: "O original tem fala entre aspas: em português, fala vai com travessão no início da linha, nunca aspas nem discurso indireto (\"— Oi — ela diz.\"). Se o mesmo parágrafo tiver narração e fala, separe em blocos com o mesmo número: [7] Ela desligou. / [7] — Droga. " +
       "Mas a fala de UM personagem nunca se divide em dois travessões seguidos (parece que outra pessoa respondeu): continue no mesmo bloco depois da narração (\"— Wilder? — ela pergunta, sonolenta. — Você está bem?\")." }
 ];
@@ -364,8 +364,49 @@ function semLinhaRepetida(blocos) {
 }
 
 
-/** Aplica as autocorreções. Devolve os blocos corrigidos. */
-function autocorrigir(blocos) {
+/* ---------- Mensagens de texto (skill: nome em negrito, mensagem em itálico) ---------- */
+
+/** O parágrafo do original é a linha de quem envia a mensagem? ("Mae:", "**Gunner**") */
+function ehRemetente(en, num) {
+  const bruto = textoEN(en, num).trim();
+  if (!bruto || nivelOriginal(en, num)) return false;
+  const negrito = /^\*\*[^*]+\*\*$/.test(bruto);
+  const t = bruto.replace(/\*+/g, "").trim();
+  if (!/^\p{Lu}[\p{L}’'.-]*(?: \p{Lu}[\p{L}’'.-]*){0,2}:?$/u.test(t)) return false;
+  if (/^(?:then|now|before|after|later|chapter|part|prologue|epilogue)\b/i.test(t)) return false;
+  return t.endsWith(":") || negrito;
+}
+
+/** O parágrafo do original é uma mensagem de texto (vem logo depois da linha de quem envia)? */
+function ehMensagem(en, num) {
+  return num > 1 && ehRemetente(en, num - 1) && !ehRemetente(en, num) && !!textoEN(en, num).trim();
+}
+
+/**
+ * Formata a troca de mensagens mesmo que o original venha sem formatação:
+ * "Mae:" → "**Mae**"; a mensagem da linha seguinte → "*Oi, amiga!*" (sem aspas, sem travessão).
+ */
+function formatarMensagens(blocos, en) {
+  return blocos.map(b => {
+    if (b.nivel) return b;
+    if (ehRemetente(en, b.num)) {
+      const nome = b.texto.replace(/\*+/g, "").replace(/:\s*$/, "").trim();
+      return nome && nome.split(/\s+/).length <= 3 ? { ...b, texto: "**" + nome + "**" } : b;
+    }
+    if (ehMensagem(en, b.num)) {
+      let t = b.texto.trim().replace(/^—\s*/, "").replace(/^[“"]\s*/, "").replace(/\s*[”"]$/, "");
+      if (/^\*[^*]/.test(t) && /[^*]\*$/.test(t)) return { ...b, texto: t }; // já em itálico
+      if (t.includes("*")) return { ...b, texto: t };                        // itálico parcial: não mexe
+      return { ...b, texto: "*" + t + "*" };
+    }
+    return b;
+  });
+}
+
+
+/** Aplica as autocorreções. Devolve os blocos corrigidos. Com o original, formata também as mensagens. */
+function autocorrigir(blocos, en) {
+  if (en) blocos = formatarMensagens(blocos, en);
   return juntarFalaDividida(semLinhaRepetida(blocos)).map(b => {
     let t = b.texto;
     AUTOCORRECOES.forEach(([de, para]) => { t = t.replace(de, para); });
@@ -429,7 +470,8 @@ function checarRegras(blocos, en) {
 
   agruparPorNumero(blocos).forEach((pt, num) => {
     const enTexto = textoEN(en, num);
-    const quebradas = REGRAS.filter(r => r.teste ? r.teste(pt, enTexto) : r.padrao.test(pt));
+    const mensagem = ehMensagem(en, num) || ehRemetente(en, num);
+    const quebradas = REGRAS.filter(r => !(mensagem && r.dialogo) && (r.teste ? r.teste(pt, enTexto) : r.padrao.test(pt)));
     if (quebradas.length) {
       violacoes.push({ num, regras: quebradas.map(r => r.nome),
         criticas: quebradas.filter(r => r.critica).map(r => r.nome),
@@ -447,6 +489,7 @@ function lembreteFinal() {
     "- Siga a skill inteira e o Doc de exemplos SB do começo ao fim do trecho, não só no início.\n" +
     "- Traduza TODOS os parágrafos, na ordem, sem resumir, cortar ou juntar.\n" +
     REGRAS.filter(r => !r.soCorrecao).map(r => "- " + r.instrucao).join("\n") + "\n" +
+    "- Mensagem de texto ou chat (mesmo sem formatação no inglês): nome de quem envia em negrito numa linha (\"**Mae**\"), a mensagem em itálico na linha seguinte (\"*Chego em cinco minutos!*\"), sem aspas e sem travessão.\n" +
     "- Fala hesitante usa reticências, nunca travessão colado na palavra (\"Eu… e… não sei.\").\n" +
     "- Mesmo tempo verbal do original; palavrões e cenas explícitas com o mesmo peso, sem suavizar.\n" +
     "- TÍTULOS: comece a linha de todo título com # e um espaço, mesmo que o original não esteja formatado como título:\n" +
