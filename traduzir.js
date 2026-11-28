@@ -399,7 +399,7 @@ function lerResposta(texto, en) {
 
   // Autocorreções já na leitura: a conferência 3B não gasta chamada com o que o código corrige sozinho
   // (travessão dentro do itálico, linha repetida, fala do mesmo personagem dividida).
-  return en ? regras.autocorrigir(semDuplicados(blocos, en)) : blocos;
+  return en ? regras.autocorrigir(semDuplicados(blocos, en), en) : blocos;
 }
 
 
@@ -647,7 +647,7 @@ async function traduzirTrecho(item) {
   }
 
   // Trava das regras SB: confere por código e manda corrigir só os parágrafos que quebraram alguma regra.
-  blocos = regras.autocorrigir(blocos);
+  blocos = regras.autocorrigir(blocos, item.en);
   let violacoes = regras.checarRegras(blocos, item.en);
 
   for (let rodada = 1; violacoes.length && rodada <= 2; rodada++) {
