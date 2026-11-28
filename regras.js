@@ -46,6 +46,8 @@ function falasPT(pt) {
   return n;
 }
 
+const contarGagueira = t => (String(t).match(/(?<!\p{L})(\p{L})-\1/giu) || []).length;
+
 const contarPalavras = t => (String(t).replace(/\[IMG\d+\]/g, "").match(/[\p{L}\d'’]+/gu) || []).length;
 
 /** Quantas vezes o parágrafo alterna entre fala (F) e narração (N). */
@@ -198,7 +200,10 @@ function instrucoesDoEstilo(instrucoes, estilo) {
  * Lista curta e certeira: são os erros que mais aparecem nas revisões da SB. */
 const REFINO = `=== REFINO EDITORIAL ===
 Você é a revisora final de uma editora brasileira exigente. Abaixo estão o original e a tradução de cada parágrafo. Releia cada par e corrija o que soar traduzido. Confira, parágrafo por parágrafo:
-1. Sentido: nada mudou, faltou ou sobrou em relação ao inglês.
+1. Sentido: nada mudou, faltou ou sobrou em relação ao inglês. Nenhuma fala, gesto, reação ou gagueira ("s-so" → "t-tão") pode sumir.
+1A. De quem é: confira a quem se refere cada "his/her/their/he/she" quando há duas pessoas na cena. Ex.: Gage pensando "bringing up his dead wife and son" → "a própria esposa e o filho mortos" (não "de Hawk"); "their friend Lily" → "a amiga deles, Lily".
+1B. Sentido da palavra NA CENA, não o do dicionário: jacket de equipe tática → "jaqueta" (não "paletó"); appointments com terapeuta → "consultas" (não "encontros"); black sites → "prisões secretas". Na dúvida, pergunte-se: "faz sentido para quem está ali?".
+1C. Voz e pontuação: pensamento em 3ª pessoa no original continua em 3ª ("when was the last time she shaved" → "quando ela tinha depilado", não "depilei"); afirmação não vira pergunta ("Like this," → "Assim.").
 2. Tempo verbal: o mesmo do original. Ação em curso no presente contínuo ("She's paying") → "está pagando". Diálogo que retoma o verbo da fala anterior precisa casar com ela.
 3. Calco: frase que segue a ordem e as palavras do inglês. Reescreva como uma autora brasileira escreveria ("a head of dark hair" → "o cabelo escuro"; "a smile spreads across his face" → "ele abre um sorriso"; "I don't think I'll make it" → "acho que não vou conseguir").
 4. Expressões idiomáticas: equivalente natural em português, nunca a tradução palavra por palavra.
@@ -223,6 +228,14 @@ function dicasDoTrecho(en) {
   return "\n\n=== EXPRESSÕES DESTE TRECHO QUE COSTUMAM VIRAR CALCO ===\n" +
     [...achadas].map(([dica, nums]) => "- [" + nums.join("], [") + "] " + dica).join("\n");
 }
+
+
+/* TERMOS FIXOS DA SÉRIE: [quando aparece no inglês, forma proibida na tradução, forma certa].
+ * Troque conforme a série que estiver na fila. Para não usar, deixe a lista vazia: [] */
+const TERMOS_FIXOS = [
+  // Série Silver Springs (Tilly H. Colson): "Doc" é o Stone, homem. "the good doc" é a Sloane: "a boa doutora".
+  [/\bDoc\b/, /(?<!boa\s)(?<!\p{L})doutora(?!\p{L})/iu, "\"Doc\" é o Stone (homem): \"Doutor\", nunca \"Doutora\". Só a Sloane é \"a boa doutora\"."]
+];
 
 
 /* Regras checadas em cada parágrafo traduzido. */
@@ -259,6 +272,22 @@ const REGRAS = [
   { nome: "narração colada na fala", soCorrecao: true,
     teste: (pt, en) => temFala(en) && /—/.test(pt) && trechosPT(pt) < trechosEN(en),
     instrucao: "Toda troca entre fala e narração leva travessão: \"— Obrigada, Gunner. — Ela saiu correndo do banheiro.\" / \"— Fiquei furiosa — a voz dela falhou. — Quando voltou…\". Narração antes de uma fala fica numa linha e a fala começa outra linha com travessão." },
+
+  // Palavrão do original que sumiu: "you look like shit" → "você está horrível",
+  // "Fuck that" → "Que se dane", "beat the shit out of" → "espancava".
+  { nome: "palavrão suavizado", soCorrecao: true,
+    teste: (pt, en) => /\b(?:fuck\w*|shit\w*|bullshit|motherfuck\w*|bitch\w*|asshole\w*|dick\w*|cock\w*|pussy|goddamn\w*|damn\w*)\b/i.test(en) &&
+      !palavra("porra|merda\\p{L}*|caralho|foda\\p{L}*|fod\\p{L}+|puta\\p{L}*|cacete|droga|desgraç\\p{L}*|maldit\\p{L}*|inferno|bosta|cretin\\p{L}*|babaca|idiota|vadia|cuzão|filh\\p{L}* da puta|pau|boceta|pinto|saco|escrot\\p{L}*|sacana\\p{L}*|diab\\p{L}*|cacet\\p{L}*").test(pt),
+    instrucao: "O original tem palavrão e a tradução ficou sem nenhum: devolva o mesmo peso (\"you look like shit\" → \"você está um lixo\"/\"está uma merda\"; \"Fuck that\" → \"Foda-se isso\"; \"beat the shit out of\" → \"descer a porrada\"; \"get our shit together\" → \"tomar jeito, porra\"). Nunca suavize." },
+
+  { nome: "termo fixo da série", soCorrecao: true,
+    teste: (pt, en) => TERMOS_FIXOS.some(([e, errado]) => e.test(en) && errado.test(pt)),
+    instrucao: (pt, en) => TERMOS_FIXOS.filter(([e, errado]) => e.test(en) && errado.test(pt)).map(t => t[2]).join(" ") },
+
+  // Gagueira do original ("I was s-so worried", "I-I") que sumiu na tradução.
+  { nome: "gagueira apagada", soCorrecao: true,
+    teste: (pt, en) => contarGagueira(en) > contarGagueira(pt),
+    instrucao: "O original tem gagueira (\"s-so\", \"I-I\"): mantenha na tradução, repetindo a primeira letra da palavra em português (\"t-tão\", \"E-eu\", \"l-ligações\")." },
 
   // TRAVAS DE CONTEÚDO (critica: true). Se continuarem quebradas depois das correções,
   // o parágrafo é traduzido de novo do zero; se ainda assim falhar, o trecho não é gravado.
@@ -340,6 +369,7 @@ function autocorrigir(blocos) {
   return juntarFalaDividida(semLinhaRepetida(blocos)).map(b => {
     let t = b.texto;
     AUTOCORRECOES.forEach(([de, para]) => { t = t.replace(de, para); });
+    t = t.replace(/^(\*{1,3})—\s*/, "— $1"); // *— Texto* → — *Texto* (fala de rádio, telefone)
     return { ...b, texto: t };
   });
 }
@@ -403,7 +433,7 @@ function checarRegras(blocos, en) {
     if (quebradas.length) {
       violacoes.push({ num, regras: quebradas.map(r => r.nome),
         criticas: quebradas.filter(r => r.critica).map(r => r.nome),
-        instrucoes: quebradas.map(r => typeof r.instrucao === "function" ? r.instrucao(pt) : r.instrucao) });
+        instrucoes: quebradas.map(r => typeof r.instrucao === "function" ? r.instrucao(pt, enTexto) : r.instrucao) });
     }
   });
 
