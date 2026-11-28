@@ -97,7 +97,7 @@ const CALCOS = [
   ["do norte do estado", "upstate New York → \"do interior de Nova York\""],
   ["fazer (?:um )?nome para (?:nós|mim|si)(?: mesm\\p{L}+)?", "make a name for ourselves → \"fazer nome\""],
   ["mão que (?:me|lhe|nos|te) foi dada", "the hand I've been dealt → \"as cartas que a vida me deu\""],
-  ["riso pelo nariz", "snort out a laugh → \"solta uma risada abafada\", \"bufa uma risada\""],
+  ["(?:riso|risada|risadinha|ri|riu) pelo nariz", "snort out a laugh → \"solta uma risada abafada\", \"bufa uma risada\""],
   ["volta da vitória", "victory lap of high fives → \"rodada de comemoração\""],
   ["(?:falo|fala|digo|diz|disse) sem expressão", "deadpan → \"digo, impassível\", \"sem mudar a cara\""],
   ["passos? (?:visíveis )?para longe", "take steps away → \"se afastam\", \"recuam\""],
