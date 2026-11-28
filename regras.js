@@ -373,8 +373,18 @@ function ehRemetente(en, num) {
   const negrito = /^\*\*[^*]+\*\*$/.test(bruto);
   const t = bruto.replace(/\*+/g, "").trim();
   if (!/^\p{Lu}[\p{L}’'.-]*(?: \p{Lu}[\p{L}’'.-]*){0,2}:?$/u.test(t)) return false;
-  if (/^(?:then|now|before|after|later|chapter|part|prologue|epilogue)\b/i.test(t)) return false;
+  if (NAO_E_REMETENTE.test(t.replace(/:$/, ""))) return false;
   return t.endsWith(":") || negrito;
+}
+
+/** Nome e mensagem na mesma linha do original: "Mae: Hey, girl!" → { nome, msg } ou null. */
+const NAO_E_REMETENTE = /^(?:then|now|before|after|later|chapter|part|prologue|epilogue|note|notes|ps|p\.s\.|rule|step|warning|update|subject|from|to|date|time|location|re|day|week|month|year)$/i;
+function mensagemNaLinha(en, num) {
+  const bruto = textoEN(en, num).trim();
+  if (!bruto || nivelOriginal(en, num)) return null;
+  const m = bruto.match(/^\*{0,3}(\p{Lu}[\p{L}’'.-]*(?: \p{Lu}[\p{L}’'.-]*){0,2})\*{0,3}:\*{0,3}\s+(\S[\s\S]*)$/u);
+  if (!m || NAO_E_REMETENTE.test(m[1])) return null;
+  return { nome: m[1], msg: m[2] };
 }
 
 /** O parágrafo do original é uma mensagem de texto (vem logo depois da linha de quem envia)? */
@@ -387,6 +397,25 @@ function ehMensagem(en, num) {
  * "Mae:" → "**Mae**"; a mensagem da linha seguinte → "*Oi, amiga!*" (sem aspas, sem travessão).
  */
 function formatarMensagens(blocos, en) {
+  const italico = t => {
+    t = String(t).trim().replace(/^—\s*/, "").replace(/^[“"]\s*/, "").replace(/\s*[”"]$/, "");
+    return /^\*[^*][\s\S]*[^*]\*$/.test(t) || t.includes("*") ? t : "*" + t + "*";
+  };
+
+  // "Mae: Hey, girl!" na mesma linha do original → "**Mae**" numa linha e "*Oi, amiga!*" na seguinte.
+  const porNumero = new Map();
+  blocos.forEach(b => porNumero.set(b.num, (porNumero.get(b.num) || []).concat(b)));
+  blocos = [...porNumero.entries()].sort((a, b) => a[0] - b[0]).flatMap(([num, lista]) => {
+    if (!mensagemNaLinha(en, num) || lista.some(b => b.nivel)) return lista;
+    if (lista.length === 1) {
+      const m = lista[0].texto.trim().match(/^\**([^:*]{1,40}?)\**:\**\s*(\S[\s\S]*)$/);
+      if (!m) return lista;
+      return [{ ...lista[0], texto: "**" + m[1].trim() + "**" }, { ...lista[0], texto: italico(m[2]) }];
+    }
+    const nome = lista[0].texto.replace(/\*+/g, "").replace(/:\s*$/, "").trim();
+    return [{ ...lista[0], texto: "**" + nome + "**" }].concat(lista.slice(1).map(b => ({ ...b, texto: italico(b.texto) })));
+  });
+
   return blocos.map(b => {
     if (b.nivel) return b;
     if (ehRemetente(en, b.num)) {
@@ -470,7 +499,7 @@ function checarRegras(blocos, en) {
 
   agruparPorNumero(blocos).forEach((pt, num) => {
     const enTexto = textoEN(en, num);
-    const mensagem = ehMensagem(en, num) || ehRemetente(en, num);
+    const mensagem = ehMensagem(en, num) || ehRemetente(en, num) || !!mensagemNaLinha(en, num);
     const quebradas = REGRAS.filter(r => !(mensagem && r.dialogo) && (r.teste ? r.teste(pt, enTexto) : r.padrao.test(pt)));
     if (quebradas.length) {
       violacoes.push({ num, regras: quebradas.map(r => r.nome),
@@ -489,7 +518,7 @@ function lembreteFinal() {
     "- Siga a skill inteira e o Doc de exemplos SB do começo ao fim do trecho, não só no início.\n" +
     "- Traduza TODOS os parágrafos, na ordem, sem resumir, cortar ou juntar.\n" +
     REGRAS.filter(r => !r.soCorrecao).map(r => "- " + r.instrucao).join("\n") + "\n" +
-    "- Mensagem de texto ou chat (mesmo sem formatação no inglês): nome de quem envia em negrito numa linha (\"**Mae**\"), a mensagem em itálico na linha seguinte (\"*Chego em cinco minutos!*\"), sem aspas e sem travessão.\n" +
+    "- Mensagem de texto ou chat (mesmo sem formatação no inglês): nome de quem envia em negrito numa linha (\"**Mae**\"), a mensagem em itálico na linha seguinte (\"*Chego em cinco minutos!*\"), sem aspas e sem travessão. Vale também quando o inglês traz nome e mensagem na mesma linha (\"Mae: Hey, girl!\").\n" +
     "- Fala hesitante usa reticências, nunca travessão colado na palavra (\"Eu… e… não sei.\").\n" +
     "- Mesmo tempo verbal do original; palavrões e cenas explícitas com o mesmo peso, sem suavizar.\n" +
     "- TÍTULOS: comece a linha de todo título com # e um espaço, mesmo que o original não esteja formatado como título:\n" +
