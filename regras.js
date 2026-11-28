@@ -30,7 +30,23 @@ const palavra = (lista, flags = "iu") => new RegExp("(?<!\\p{L})(" + lista + ")(
 
 
 /* O parágrafo em inglês tem fala (e não só aspas de ênfase)? */
-const temFala = en => /^\s*\*{0,3}["“]/.test(en) || /[,?!…]\*{0,3}["”]/.test(en);
+const temFala = en => /^\s*\*{0,3}["“]/.test(en) || /[.,?!…\u2014\-]\*{0,3}["”]/.test(en);
+
+/** Quantas falas (trechos entre aspas) o parágrafo do inglês tem. */
+const falasEN = en => (String(en).match(/[“"][^“”"]*\p{L}[^“”"]*[”"]/gu) || []).length;
+
+/** Quantas falas (trechos depois de travessão) a tradução tem. */
+function falasPT(pt) {
+  let n = 0;
+  String(pt).split("\n").forEach(linha => {
+    const l = linha.trim().replace(/^\*+/, "");
+    if (!/^—/.test(l)) return;
+    l.replace(/^—\s*/, "").split(/\s—\s/).forEach((parte, i) => { if (i % 2 === 0 && /\p{L}/u.test(parte)) n++; });
+  });
+  return n;
+}
+
+const contarPalavras = t => (String(t).replace(/\[IMG\d+\]/g, "").match(/[\p{L}\d'’]+/gu) || []).length;
 
 /** Quantas vezes o parágrafo alterna entre fala (F) e narração (N). */
 function trechosEN(en) {
@@ -226,7 +242,7 @@ const REGRAS = [
     instrucao: "\"Estou te vendo\", \"posso te ajudar\" → \"Estou vendo você\", \"Posso ajudar você\"." },
 
   { nome: "termo em inglês", padrao: palavra("Doc|UK|US|USA", "u"),
-    instrucao: "\"Doc\" (médica) → \"doutora\"; \"UK\" → \"Reino Unido\"; \"US\"/\"USA\" → \"Estados Unidos\"." },
+    instrucao: "\"Doc\" → \"Doutor\" se o personagem é homem, \"Doutora\" se é mulher (confira no glossário e no contexto; o mesmo personagem nunca alterna); \"UK\" → \"Reino Unido\"; \"US\"/\"USA\" → \"Estados Unidos\"." },
 
   { nome: "travessão na narração", teste: pt => pt.split("\n").some(l => !/^\*{0,3}—/.test(l.trim()) && /\s—\s/.test(l)), // linha a linha: narração e fala podem vir em blocos separados
     instrucao: "Travessão só em diálogo. Na narração, troque por vírgula, ponto e vírgula, dois-pontos, reticências ou parênteses." },
@@ -243,6 +259,22 @@ const REGRAS = [
   { nome: "narração colada na fala", soCorrecao: true,
     teste: (pt, en) => temFala(en) && /—/.test(pt) && trechosPT(pt) < trechosEN(en),
     instrucao: "Toda troca entre fala e narração leva travessão: \"— Obrigada, Gunner. — Ela saiu correndo do banheiro.\" / \"— Fiquei furiosa — a voz dela falhou. — Quando voltou…\". Narração antes de uma fala fica numa linha e a fala começa outra linha com travessão." },
+
+  // TRAVAS DE CONTEÚDO (critica: true). Se continuarem quebradas depois das correções,
+  // o parágrafo é traduzido de novo do zero; se ainda assim falhar, o trecho não é gravado.
+
+  // Fala do original que sumiu na tradução ("James, I don't… I don't love you." cortada).
+  // Só acusa quando a tradução também ficou menor que o inglês (juntar duas falas num
+  // travessão só, sem perder nada, não conta).
+  { nome: "fala perdida", soCorrecao: true, critica: true,
+    teste: (pt, en) => falasEN(en) > falasPT(pt) && contarPalavras(pt) < contarPalavras(en),
+    instrucao: "Uma fala do original sumiu da tradução. Traduza o parágrafo inteiro de novo, frase por frase, com TODAS as falas do inglês, cada uma com travessão, no mesmo lugar em que aparecem." },
+
+  // Parágrafo bem mais curto que o original: frase, gesto ou reação cortados
+  // ("Her eyes snapped up from the plate." sumiu antes da fala).
+  { nome: "trecho cortado", soCorrecao: true, critica: true,
+    teste: (pt, en) => contarPalavras(en) >= 10 && contarPalavras(pt) < 0.65 * contarPalavras(en),
+    instrucao: "A tradução ficou bem menor que o original: falta frase, gesto, reação ou detalhe. Confira frase por frase com o inglês e traduza o que faltou, no lugar certo, sem resumir." },
 
   // Fala de verdade no original: parágrafo que abre com aspas, ou aspas fechando depois de , ? ! …
   // (aspas de ênfase, título ou placa não contam).
@@ -286,9 +318,26 @@ function juntarFalaDividida(blocos) {
 }
 
 
+/**
+ * Linha repetida no mesmo §: "Antes que Gunner pudesse responder, o celular vibrou no bolso."
+ * seguida de "O celular vibrou no bolso." A linha que só repete o que o bloco anterior
+ * do mesmo § já disse é removida.
+ */
+function semLinhaRepetida(blocos) {
+  const norm = t => String(t).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\d ]+/gu, " ").replace(/\s+/g, " ").trim();
+  return blocos.filter((b, i) => {
+    const ant = blocos[i - 1];
+    if (!ant || ant.num !== b.num || ant.nivel || b.nivel) return true;
+    const n = norm(b.texto);
+    return !(n.split(" ").length >= 3 && norm(ant.texto).includes(n));
+  });
+}
+
+
 /** Aplica as autocorreções. Devolve os blocos corrigidos. */
 function autocorrigir(blocos) {
-  return juntarFalaDividida(blocos).map(b => {
+  return juntarFalaDividida(semLinhaRepetida(blocos)).map(b => {
     let t = b.texto;
     AUTOCORRECOES.forEach(([de, para]) => { t = t.replace(de, para); });
     return { ...b, texto: t };
@@ -353,6 +402,7 @@ function checarRegras(blocos, en) {
     const quebradas = REGRAS.filter(r => r.teste ? r.teste(pt, enTexto) : r.padrao.test(pt));
     if (quebradas.length) {
       violacoes.push({ num, regras: quebradas.map(r => r.nome),
+        criticas: quebradas.filter(r => r.critica).map(r => r.nome),
         instrucoes: quebradas.map(r => typeof r.instrucao === "function" ? r.instrucao(pt) : r.instrucao) });
     }
   });
