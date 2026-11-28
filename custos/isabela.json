@@ -5,5 +5,11 @@
     "trechos": 51,
     "modelo": "openai/gpt-6-luna",
     "concluido": "2026-11-28"
+  },
+  "1jnXPLIK81EUAJ3_TxVM548_22xa8NJc1QhyP6InV0jc": {
+    "nome": "Silver Secrets (Tilly H. Colson)",
+    "usd": 0.05459661000000001,
+    "trechos": 7,
+    "modelo": "openai/gpt-6-luna"
   }
 }
