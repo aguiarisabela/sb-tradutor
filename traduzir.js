@@ -12,6 +12,7 @@
  */
 
 const regras = require("./regras.js");
+const fs = require("fs");
 
 const limpar = v => String(v || "").trim().replace(/^["']|["']$/g, "").replace(/^Bearer\s+/i, "");
 const PONTE_URL = limpar(process.env.PONTE_URL);
@@ -35,6 +36,46 @@ let provedor = "baidu";
 let baiduCaraAte = 0;        // até quando evitar a Baidu
 let regua = 0.0006;          // US$ por mil tokens de resposta na DeepInfra (atualiza com o medido)
 let porProvedor = {};        // custo e tokens de resposta do trecho atual, por provedor
+
+/* ---------- Custo de cada livro (soma todas as execuções) ----------
+ * Fica em custos/<adm>.json, salvo no GitHub no fim de cada execução (passo "Registrar execução").
+ * Um arquivo por adm: execuções de adms diferentes não brigam pelo mesmo arquivo. */
+const ARQ_CUSTOS = "custos/" + (ADM.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  .replace(/[^\w]+/g, "-").toLowerCase() || "isabela") + ".json";
+let custos = {};
+try { custos = JSON.parse(fs.readFileSync(ARQ_CUSTOS, "utf8")); } catch (e) { custos = {}; }
+const livrosDaExecucao = new Set();
+
+/** Soma o custo do trecho no livro e salva. Devolve o total do livro até agora. */
+function somarCusto(item, valor) {
+  const nome = String(item.rotulo || "").split(" · ")[0];
+  const chave = item.originalId || nome;
+  const c = custos[chave] = custos[chave] || { nome, usd: 0, trechos: 0 };
+  c.usd += valor;
+  c.trechos++;
+  c.modelo = item.config && item.config.modelo;
+  livrosDaExecucao.add(chave);
+  try {
+    fs.mkdirSync("custos", { recursive: true });
+    fs.writeFileSync(ARQ_CUSTOS, JSON.stringify(custos, null, 2));
+  } catch (e) { /* registro de custo não pode parar a tradução */ }
+  return c;
+}
+
+/** Livro concluído: mostra o total gasto nele, somando todas as execuções. */
+function totalDoLivro(item) {
+  const texto = String(item.concluido || "");
+  const chave = Object.keys(custos).find(k =>
+    k === item.originalId || (custos[k].nome && texto.indexOf(custos[k].nome) >= 0));
+  const c = chave && custos[chave];
+  if (!c || c.concluido) return;
+
+  c.concluido = new Date().toISOString().slice(0, 10);
+  livrosDaExecucao.add(chave);
+  try { fs.writeFileSync(ARQ_CUSTOS, JSON.stringify(custos, null, 2)); } catch (e) {}
+  log("CUSTO TOTAL DO LIVRO " + c.nome + ": US$ " + c.usd.toFixed(4) + " em " + c.trechos +
+    " trecho(s)" + (c.modelo ? " · modelo " + c.modelo : "") + ".");
+}
 
 const esperar = ms => new Promise(r => setTimeout(r, ms));
 const hora = () => new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
@@ -91,9 +132,15 @@ async function ponte(acao, dados = {}) {
 
 /* ---------- IA (OpenRouter) ---------- */
 
+/** O modelo do CONFIG é DeepSeek? (só ele usa a escolha Baidu/DeepInfra) */
+function ehDeepSeek(modelo) {
+  return /deepseek/i.test(String(modelo || ""));
+}
+
 /** Depois de cada trecho: se a Baidu saiu mais cara que a DeepInfra, usa a DeepInfra por 1 hora
  *  e depois testa a Baidu de novo. */
-function escolherProvedor() {
+function escolherProvedor(modelo) {
+  if (!ehDeepSeek(modelo)) return;
   const porMil = p => p && p.saida > 5000 ? 1000 * p.custo / p.saida : 0;
   const deepinfra = porMil(porProvedor.deepinfra);
   const baidu = porMil(porProvedor.baidu);
@@ -141,12 +188,15 @@ async function chamarIA(config, instrucoes, mensagem, sessao) {
           max_tokens: Number(config.maxTokens) || 32000,
           reasoning: { effort: config.esforco || "low" },
           session_id: sessao,
-          // Cache é por provedor: nas 2 primeiras tentativas fica só no escolhido (espera e tenta
-          // de novo); o outro provedor entra só se o escolhido continuar fora do ar.
-          provider: {
-            order: tentativa <= 2 ? [provedor] : provedor === "baidu" ? ["baidu", "deepinfra"] : ["deepinfra", "baidu"],
-            allow_fallbacks: false
-          },
+          // Só no DeepSeek: cache é por provedor; nas 2 primeiras tentativas fica só no escolhido
+          // (espera e tenta de novo); o outro provedor entra só se o escolhido continuar fora do ar.
+          // Outros modelos (ex.: GPT) usam o provedor padrão do OpenRouter, com cache automático.
+          ...(ehDeepSeek(config.modelo) && {
+            provider: {
+              order: tentativa <= 2 ? [provedor] : provedor === "baidu" ? ["baidu", "deepinfra"] : ["deepinfra", "baidu"],
+              allow_fallbacks: false
+            }
+          }),
           usage: { include: true }
         }),
         signal: AbortSignal.timeout(15 * 60 * 1000)
@@ -678,6 +728,7 @@ async function main() {
 
     if (item.concluido) {
       log("LIVRO CONCLUÍDO: " + item.concluido);
+      totalDoLivro(item);
       continue;
     }
 
@@ -738,11 +789,13 @@ async function main() {
 
       log("Resposta da IA: " + (tokensSaida - saidaAntes) + " tokens.");
 
+      const livro = somarCusto(item, gastoUS - custoAntes);
       log("Custo do trecho: US$ " + (gastoUS - custoAntes).toFixed(4) +
-        " · total desta execução: US$ " + gastoUS.toFixed(4));
+        " · total desta execução: US$ " + gastoUS.toFixed(4) +
+        " · total do livro até agora: US$ " + livro.usd.toFixed(4));
 
       trechos++;
-      escolherProvedor();
+      escolherProvedor(item.config.modelo);
 
     } catch (e) {
       // Créditos ou chave: não adianta insistir (as outras adms seguem nas execuções delas).
@@ -793,6 +846,11 @@ async function main() {
 
   log(motivoFim);
   log("Fim desta execução: " + trechos + " trecho(s), US$ " + gastoUS.toFixed(4) + ".");
+  livrosDaExecucao.forEach(k => {
+    const c = custos[k];
+    log((c.concluido ? "Total do livro (concluído) " : "Total do livro até agora ") + c.nome + ": US$ " +
+      c.usd.toFixed(4) + " em " + c.trechos + " trecho(s).");
+  });
 }
 
 
