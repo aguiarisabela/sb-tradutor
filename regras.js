@@ -32,6 +32,37 @@ const palavra = (lista, flags = "iu") => new RegExp("(?<!\\p{L})(" + lista + ")(
 /* O parágrafo em inglês tem fala (e não só aspas de ênfase)? */
 const temFala = en => /^\s*\*{0,3}["“]/.test(en) || /[,?!…]\*{0,3}["”]/.test(en);
 
+/** Quantas vezes o parágrafo alterna entre fala (F) e narração (N). */
+function trechosEN(en) {
+  const seq = [];
+  let dentro = false, atual = "";
+  const fecha = () => {
+    if (/\p{L}/u.test(atual)) { const t = dentro ? "F" : "N"; if (seq[seq.length - 1] !== t) seq.push(t); }
+    atual = "";
+  };
+  for (const c of String(en)) {
+    if (c === "“" || (c === '"' && !dentro)) { fecha(); dentro = true; }
+    else if (c === "”" || (c === '"' && dentro)) { fecha(); dentro = false; }
+    else atual += c;
+  }
+  fecha();
+  return seq.length;
+}
+
+function trechosPT(pt) {
+  const seq = [];
+  const pos = t => { if (seq[seq.length - 1] !== t) seq.push(t); };
+  String(pt).split("\n").forEach(linha => {
+    const l = linha.trim().replace(/^\*+/, "");
+    if (!/\p{L}/u.test(l)) return;
+    if (!/^—/.test(l)) return pos("N");
+    l.replace(/^—\s*/, "").split(/\s—\s/).forEach((parte, i) => {
+      if (/\p{L}/u.test(parte)) pos(i % 2 === 0 ? "F" : "N");
+    });
+  });
+  return seq.length;
+}
+
 
 /* Calcos do inglês já encontrados na revisão: [padrão, forma natural].
  * Para acrescentar: copie uma linha e troque o padrão e a sugestão. */
@@ -206,6 +237,12 @@ const REGRAS = [
       return marcas(en) !== marcas(pt);
     },
     instrucao: "Marcadores [IMG1], [IMG2]… são imagens do livro (emoji, ícone): copie cada um exatamente igual, no mesmo lugar da frase, sem traduzir, mover ou remover." },
+
+  // Original alterna fala e narração mais vezes que a tradução: narração ficou colada na fala
+  // ("— Obrigada, Gunner. Ela saiu correndo…") ou fala colada na narração ("Ele rosnou. — Case comigo.").
+  { nome: "narração colada na fala", soCorrecao: true,
+    teste: (pt, en) => temFala(en) && /—/.test(pt) && trechosPT(pt) < trechosEN(en),
+    instrucao: "Toda troca entre fala e narração leva travessão: \"— Obrigada, Gunner. — Ela saiu correndo do banheiro.\" / \"— Fiquei furiosa — a voz dela falhou. — Quando voltou…\". Narração antes de uma fala fica numa linha e a fala começa outra linha com travessão." },
 
   // Fala de verdade no original: parágrafo que abre com aspas, ou aspas fechando depois de , ? ! …
   // (aspas de ênfase, título ou placa não contam).
