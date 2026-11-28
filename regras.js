@@ -251,6 +251,15 @@ const REGRAS = [
   { nome: "palavra fora do padrão editorial", padrao: palavra("trep\\p{L}*|paparic\\p{L}*|boyzinho\\p{L}*|vendeta\\p{L}*|chiliques?|danad[oa]s?|xoxota\\p{L}*|cu"),
     instrucao: "\"trepar\" → \"transar\"; \"paparico\" → \"mimo\"; \"boyzinho\" → \"rapaz\"; \"vendeta\" → \"vingança\"; \"chilique\" → \"escândalo\"; nunca \"danada\" (use \"porra\", \"caralho\"); nunca \"cu\" nem \"xoxota\" (ass → \"bunda\"; pussy → \"boceta\")." },
 
+  { nome: "português de Portugal",
+    padrao: new RegExp("(?<!\\p{L})(?:" + [
+      "(?:est\\p{L}*|ficou|ficava|ficaram|ficavam|andava|andavam|anda|andam|ainda|sempre) a (?!qualquer|par(?!\\p{L})|mil(?!\\p{L}))\\p{L}+[aei]r", // "estava a fazer", "ainda a brincar"
+      "\\p{L}+-te", "\\p{L}+-vos",                                                     // "amo-te", "digo-vos"
+      "estás|tens|queres|podes|sabes|vês|fazes|dizes",                                       // conjugação de "tu"
+      "telemóve\\p{L}*|autocarros?|comboios?|pequeno-almoço|casa de banho|raparigas?|miúd[oa]s?|fixe|frigorífico|ecrãs?|equipas?|utilizador\\p{L}*|bué|connosco|contactos?|factos?|registos?|receção|perceber de|sumos?"
+    ].join("|") + ")(?!\\p{L})", "iu"),
+    instrucao: "Sempre português do Brasil, nunca de Portugal: \"estava fazendo\" (não \"estava a fazer\"); \"ainda mexendo\" (não \"ainda a brincar\"); \"amo você\" (não \"amo-te\"); \"você está\" (não \"tu estás\"); celular, ônibus, trem, café da manhã, banheiro, garota, menino, legal, geladeira, tela, equipe, usuário, conosco, contato, fato." },
+
   { nome: "pronome \"te\" com locução", padrao: palavra("(estou|está|estava|estamos|vou|vai|vamos|posso|pode|podia|quero|queria|preciso|precisa)\\s+te\\s+\\p{L}+"),
     instrucao: "\"Estou te vendo\", \"posso te ajudar\" → \"Estou vendo você\", \"Posso ajudar você\"." },
 
